@@ -94,6 +94,10 @@ switch (cmd) {
     await runServe(args.slice(1));
     break;
 
+  case 'watch':
+    await runWatch();
+    break;
+
   default:
     showHelp();
     break;
@@ -447,12 +451,12 @@ async function streamSession(sessionId) {
             break;
           case 'session.completed': {
             if (streaming) { process.stdout.write('\n'); streaming = false; }
-            // Show files written + commands run
             const r = event.result ?? {};
             if (r.files_written?.length) console.log(`\n  \x1b[32m✓\x1b[0m Files: ${r.files_written.join(', ')}`);
             if (r.commands_run?.length) console.log(`  \x1b[32m✓\x1b[0m Commands run: ${r.commands_run.length}`);
             if (r.tokens_used) console.log(`  \x1b[2m${r.tokens_used} tokens · ${r.model}\x1b[0m`);
             console.log('\n  \x1b[32m✓ Done\x1b[0m\n');
+            await showResultPreview(r);   // confirm server/file actually exists
             ws.close();
             resolve();
             break;
@@ -496,6 +500,7 @@ async function pollSession(sessionId) {
       console.log('\n  ✓ Done\n');
       const out = s.result?.output ?? s.result;
       if (out && typeof out === 'string') console.log(`  ${out}\n`);
+      await showResultPreview(s.result ?? {});
       return;
     }
     if (s.status === 'failed') {
@@ -804,6 +809,177 @@ async function waitForTunnelUrl(proc, pattern, timeout) {
   });
 }
 
+// ─── Result preview — confirms the agent's work actually ran ────────────────
+
+async function showResultPreview(result) {
+  if (!result) return;
+  const files = result.files_written ?? [];
+  const cmds  = result.commands_run  ?? [];
+  const out   = result.output        ?? '';
+
+  // 1. Server check — if a port was mentioned, verify HTTP response
+  const allText = [...cmds, out].join(' ');
+  const portMatch = allText.match(/(?:localhost:|port\s*[=:]?\s*)(\d{4,5})/i);
+  if (portMatch) {
+    const port = parseInt(portMatch[1], 10);
+    await sleep(1200); // give server a moment to bind
+    try {
+      const res = await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(2500) });
+      const body = await res.text();
+      const preview = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+      console.log(`  \x1b[32m⬡ Confirmed live:\x1b[0m http://localhost:${port} (HTTP ${res.status})`);
+      if (preview) console.log(`  \x1b[2m${preview}\x1b[0m`);
+    } catch {
+      // Server not up yet — non-fatal, ExecutionVerifier already handled this
+    }
+  }
+
+  // 2. File preview — show first few lines of the most significant created file
+  if (files.length > 0) {
+    const mainFile = files.find(f => /\.(html|jsx?|tsx?|py|rs|go|md|css|json)$/.test(f)) ?? files[0];
+    try {
+      const { readFileSync } = await import('node:fs');
+      const { resolve: res } = await import('node:path');
+      const fullPath = res(process.env['ZEROAGENT_CWD'] ?? process.cwd(), mainFile);
+      const content  = readFileSync(fullPath, 'utf8');
+      const lines    = content.split('\n').slice(0, 6).join('\n');
+      console.log(`\n  \x1b[2m── ${mainFile} ─────────────────────────────────\x1b[0m`);
+      console.log(`  \x1b[2m${lines}\x1b[0m`);
+      if (content.split('\n').length > 6) console.log(`  \x1b[2m...\x1b[0m`);
+    } catch {}
+  }
+
+  console.log();
+}
+
+// ─── Watch mode — ambient intelligence ──────────────────────────────────────
+
+async function runWatch() {
+  // Ensure daemon is running (auto-starts if needed)
+  await requireDaemon();
+
+  const { basename } = await import('node:path');
+  const cwdName = basename(process.cwd());
+
+  // Header
+  console.log(`\n  \x1b[1m0agent\x1b[0m watching \x1b[36m${cwdName}\x1b[0m`);
+  console.log(`  ${'─'.repeat(42)}`);
+
+  // Show current graph state
+  try {
+    const h = await fetch(`${BASE_URL}/api/health`).then(r => r.json()).catch(() => null);
+    if (h) {
+      console.log(`  Graph:  ${h.graph_nodes ?? 0} nodes · ${h.graph_edges ?? 0} edges`);
+      console.log(`  Uptime: ${Math.round((h.uptime_ms ?? 0) / 60000)}m · Sandbox: ${h.sandbox_backend ?? '—'}`);
+    }
+  } catch {}
+
+  // Show any unseen insights immediately
+  try {
+    const insights = await fetch(`${BASE_URL}/api/insights?seen=false`).then(r => r.json()).catch(() => []);
+    if (Array.isArray(insights) && insights.length > 0) {
+      console.log(`\n  \x1b[33m${insights.length} unseen insight${insights.length > 1 ? 's' : ''}:\x1b[0m`);
+      for (const ins of insights.slice(0, 3)) {
+        const icon = ins.type === 'test_failure' ? '\x1b[31m●\x1b[0m' : ins.type === 'git_anomaly' ? '\x1b[33m⚡\x1b[0m' : '\x1b[36m◆\x1b[0m';
+        console.log(`  ${icon} ${ins.summary}`);
+        if (ins.suggested_action) console.log(`    \x1b[2m→ ${ins.suggested_action}\x1b[0m`);
+      }
+    } else {
+      console.log(`\n  Watching for insights...`);
+    }
+  } catch {}
+
+  console.log(`\n  \x1b[2mPress Enter to run suggested action · q to quit\x1b[0m\n`);
+
+  // Connect WebSocket for live events
+  const WS = await importWS();
+  let lastSuggestion = null;
+  let ws;
+
+  const connect = () => {
+    ws = new WS(`ws://localhost:4200/ws`);
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({ type: 'subscribe', topics: ['sessions', 'graph', 'insights', 'stats'] }));
+    });
+
+    ws.on('message', (data) => {
+      try {
+        const event = JSON.parse(data.toString());
+        const ts = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+        switch (event.type) {
+          case 'agent.insight': {
+            const ins = event.insight ?? {};
+            const icon = ins.type === 'test_failure' ? '\x1b[31m● test\x1b[0m'
+              : ins.type === 'git_anomaly'   ? '\x1b[33m⚡ git\x1b[0m'
+              : '\x1b[36m◆ insight\x1b[0m';
+            console.log(`  [${ts}] ${icon}  ${ins.summary}`);
+            if (ins.suggested_action) {
+              console.log(`          \x1b[36m→ ${ins.suggested_action}\x1b[0m`);
+              lastSuggestion = ins.suggested_action;
+            }
+            break;
+          }
+          case 'session.completed':
+            console.log(`  [${ts}] \x1b[32m✓\x1b[0m  Session completed`);
+            break;
+          case 'session.failed':
+            console.log(`  [${ts}] \x1b[31m✗\x1b[0m  Session failed: ${event.error}`);
+            break;
+          case 'graph.weight_updated':
+            // Subtle learning indicator — one dot per weight change
+            process.stdout.write('\x1b[2m·\x1b[0m');
+            break;
+          case 'team.synced':
+            console.log(`  [${ts}] \x1b[35m⬡\x1b[0m  Team synced (↑${event.deltas_pushed ?? 0} ↓${event.deltas_pulled ?? 0})`);
+            break;
+        }
+      } catch {}
+    });
+
+    ws.on('error', () => {});
+    ws.on('close', () => {
+      setTimeout(connect, 3000); // reconnect on daemon restart
+    });
+  };
+
+  connect();
+
+  // Keyboard handling — Enter = act, q = quit
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', async (key) => {
+      if (key === '\u0003' || key === 'q') { // Ctrl+C or q
+        process.stdout.write('\n');
+        ws?.close();
+        process.stdin.setRawMode(false);
+        process.exit(0);
+      }
+      if (key === '\r' && lastSuggestion) {
+        // Extract executable part from suggestion
+        const cmd = lastSuggestion.match(/(?:0agent\s+)?(\/?[\w-]+(?:\s+"[^"]*")?)/);
+        if (cmd) {
+          process.stdout.write('\n');
+          const parts = cmd[1].trim().split(/\s+/);
+          if (parts[0].startsWith('/')) {
+            await runSkill(parts[0].slice(1), parts.slice(1));
+          } else if (parts[0] === 'run' || !['start','stop','init','chat'].includes(parts[0])) {
+            await runTask(parts[0] === 'run' ? parts.slice(1) : parts);
+          }
+          lastSuggestion = null;
+        }
+      }
+    });
+  } else {
+    // Non-interactive: just watch, no keyboard
+    process.on('SIGINT', () => { ws?.close(); process.exit(0); });
+    await new Promise(() => {}); // run forever
+  }
+}
+
 function showHelp() {
   console.log(`
   0agent — An agent that learns.
@@ -838,6 +1014,10 @@ function showHelp() {
     0agent /build --task next
     0agent /qa --url https://staging.myapp.com
     0agent serve --tunnel          # then share the URL + 0agent team join <CODE>
+    0agent watch                   # ambient mode — live insights, press Enter to act
+
+  Auto-start:
+    The daemon auto-starts on first 0agent run. No need for 0agent start.
 `);
 }
 
@@ -853,10 +1033,46 @@ async function isDaemonRunning() {
 }
 
 async function requireDaemon() {
-  if (!(await isDaemonRunning())) {
-    console.log('\n  Daemon is not running. Start it with: 0agent start\n');
+  if (await isDaemonRunning()) return;
+
+  // Auto-start if config exists — no manual `0agent start` needed
+  if (!existsSync(CONFIG_PATH)) {
+    console.log('\n  Not initialised. Run: 0agent init\n');
     process.exit(1);
   }
+
+  process.stdout.write('  Starting daemon');
+  await _startDaemonBackground();
+
+  for (let i = 0; i < 24; i++) {
+    await sleep(500);
+    process.stdout.write('.');
+    if (await isDaemonRunning()) {
+      process.stdout.write(' ✓\n\n');
+      return;
+    }
+  }
+  process.stdout.write(' ✗\n');
+  console.log('  Daemon failed to start. Check: 0agent logs\n');
+  process.exit(1);
+}
+
+// Internal: spawn daemon process without printing the full startup banner
+async function _startDaemonBackground() {
+  const { resolve: res, dirname: dn, existsSync: ex } = await import('node:path').then(m => m);
+  const pkgRoot   = res(dn(new URL(import.meta.url).pathname), '..');
+  const bundled   = res(pkgRoot, 'dist', 'daemon.mjs');
+  const devPath   = res(pkgRoot, 'packages', 'daemon', 'dist', 'start.js');
+  const script    = ex(bundled) ? bundled : devPath;
+  if (!ex(script)) return;
+
+  mkdirSync(resolve(AGENT_DIR, 'logs'), { recursive: true });
+  const child = spawn(process.execPath, [script], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, ZEROAGENT_CONFIG: CONFIG_PATH },
+  });
+  child.unref();
 }
 
 async function importWS() {
