@@ -1,0 +1,35 @@
+node_modules/
+dist/
+**/dist/
+.turbo/
+*.tsbuildinfo
+.DS_Store
+.claude/
+
+# Build artifacts
+packages/*/dist/
+packages/core-native/*.node
+packages/core-native/Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# Secrets
+.env
+*.enc
+cred.key
+~/.0agent/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test output
+coverage/

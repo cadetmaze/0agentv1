@@ -1,0 +1,6 @@
+{
+  "name": "@0agent/seed-software-engineering",
+  "version": "0.1.0",
+  "main": "install.js",
+  "type": "module"
+}

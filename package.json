@@ -1,0 +1,59 @@
+{
+  "name": "0agent",
+  "version": "1.0.0",
+  "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
+  "private": false,
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "0agent": "./bin/0agent.js"
+  },
+  "files": [
+    "bin/",
+    "packages/core/dist/",
+    "packages/mcp-hub/dist/",
+    "packages/daemon/dist/",
+    "packages/subagent/dist/",
+    "packages/subagent-runtime/dist/",
+    "skills/",
+    "seeds/"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@0agent/core": "workspace:*",
+    "@0agent/daemon": "workspace:*",
+    "@0agent/mcp-hub": "workspace:*",
+    "@0agent/subagent": "workspace:*",
+    "@0agent/subagent-runtime": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/node": "^25.5.0",
+    "turbo": "^2.1.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "llm",
+    "knowledge-graph",
+    "mcp",
+    "autonomous",
+    "learning"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0agent-oss/0agent"
+  },
+  "homepage": "https://github.com/0agent-oss/0agent#readme",
+  "packageManager": "pnpm@9.12.0"
+}

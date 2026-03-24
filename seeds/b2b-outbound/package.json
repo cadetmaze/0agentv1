@@ -1,0 +1,6 @@
+{
+  "name": "@0agent/seed-b2b-outbound",
+  "version": "0.1.0",
+  "main": "install.js",
+  "type": "module"
+}

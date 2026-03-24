@@ -1,0 +1,102 @@
+{
+  "name": "@0agent/software-engineering",
+  "version": "1.0.0",
+  "description": "Sprint workflow: Think → Plan → Build → Review → Test → Ship → Reflect",
+
+  "nodes": [
+    {"label": "new_feature", "type": "context"},
+    {"label": "bug_fix", "type": "context"},
+    {"label": "refactor_needed", "type": "context"},
+    {"label": "tech_debt", "type": "context"},
+
+    {"label": "office-hours", "type": "plan", "metadata": {"is_skill": true}},
+    {"label": "plan-ceo-review", "type": "plan", "metadata": {"is_skill": true}},
+    {"label": "plan-eng-review", "type": "plan", "metadata": {"is_skill": true}},
+    {"label": "build", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "review", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "qa", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "security-audit", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "ship", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "retro", "type": "outcome", "metadata": {"is_skill": true}},
+    {"label": "debug", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "test-writer", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "refactor", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "research", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "design-review", "type": "step", "metadata": {"is_skill": true}},
+    {"label": "doc", "type": "step", "metadata": {"is_skill": true}},
+
+    {"label": "shipped_clean", "type": "outcome"},
+    {"label": "qa_caught_bugs", "type": "signal"},
+    {"label": "review_caught_bugs", "type": "signal"},
+    {"label": "shipped_with_issues", "type": "outcome"}
+  ],
+
+  "edges": [
+    {"from": "new_feature", "to": "office-hours", "weight": 0.80, "type": "leads_to",
+     "rationale": "New features benefit from design thinking before building"},
+    {"from": "new_feature", "to": "build", "weight": 0.30, "type": "leads_to",
+     "rationale": "Sometimes you just need to build it — but risky without planning"},
+
+    {"from": "bug_fix", "to": "debug", "weight": 0.85, "type": "leads_to",
+     "rationale": "Bugs should be diagnosed before fixed"},
+    {"from": "bug_fix", "to": "build", "weight": 0.50, "type": "leads_to",
+     "rationale": "Simple bugs can go straight to fix"},
+
+    {"from": "refactor_needed", "to": "test-writer", "weight": 0.80, "type": "leads_to",
+     "rationale": "Write tests before refactoring — safety net first"},
+    {"from": "refactor_needed", "to": "refactor", "weight": 0.40, "type": "leads_to",
+     "rationale": "Refactoring without tests is risky — lower initial weight"},
+
+    {"from": "office-hours", "to": "plan-ceo-review", "weight": 0.85, "type": "leads_to",
+     "rationale": "Design docs should be validated for product fit"},
+    {"from": "plan-ceo-review", "to": "plan-eng-review", "weight": 0.80, "type": "leads_to",
+     "rationale": "Product-approved plans need technical architecture review"},
+    {"from": "plan-eng-review", "to": "build", "weight": 0.90, "type": "leads_to",
+     "rationale": "Technically reviewed plans are ready for implementation"},
+
+    {"from": "build", "to": "review", "weight": 0.90, "type": "leads_to",
+     "rationale": "All code should be reviewed before testing"},
+    {"from": "build", "to": "design-review", "weight": 0.45, "type": "leads_to",
+     "rationale": "UI changes benefit from design review — context-dependent"},
+    {"from": "build", "to": "qa", "weight": 0.35, "type": "leads_to",
+     "rationale": "Skipping review is risky — low initial weight, will learn"},
+
+    {"from": "design-review", "to": "review", "weight": 0.70, "type": "leads_to",
+     "rationale": "Design-reviewed code proceeds to code review"},
+
+    {"from": "review", "to": "qa", "weight": 0.85, "type": "leads_to",
+     "rationale": "Reviewed code should proceed to QA testing"},
+    {"from": "review", "to": "security-audit", "weight": 0.50, "type": "leads_to",
+     "rationale": "Security audit is context-dependent — starts neutral"},
+    {"from": "review", "to": "ship", "weight": 0.30, "type": "leads_to",
+     "rationale": "Shipping without QA is risky — low initial weight"},
+
+    {"from": "security-audit", "to": "qa", "weight": 0.75, "type": "leads_to",
+     "rationale": "Security-audited code still needs QA"},
+
+    {"from": "qa", "to": "ship", "weight": 0.85, "type": "leads_to",
+     "rationale": "QA-passed code is ready to ship"},
+    {"from": "qa", "to": "build", "weight": 0.60, "type": "leads_to",
+     "rationale": "QA failures go back to build for fixes"},
+
+    {"from": "ship", "to": "retro", "weight": 0.70, "type": "leads_to",
+     "rationale": "Shipped features benefit from retrospective — not always needed"},
+    {"from": "ship", "to": "doc", "weight": 0.55, "type": "leads_to",
+     "rationale": "Shipped features should be documented"},
+
+    {"from": "ship", "to": "shipped_clean", "weight": 0.50, "type": "leads_to",
+     "rationale": "Neutral — will learn from actual ship outcomes"},
+
+    {"from": "review", "to": "review_caught_bugs", "weight": 0.50, "type": "leads_to",
+     "rationale": "Starts neutral — /retro will adjust based on actual catch rate"},
+    {"from": "qa", "to": "qa_caught_bugs", "weight": 0.50, "type": "leads_to",
+     "rationale": "Starts neutral — /retro will adjust based on actual catch rate"},
+
+    {"from": "debug", "to": "build", "weight": 0.85, "type": "leads_to",
+     "rationale": "Diagnosed bugs proceed to fix implementation"},
+    {"from": "test-writer", "to": "refactor", "weight": 0.80, "type": "leads_to",
+     "rationale": "Tests written → safe to refactor"},
+    {"from": "refactor", "to": "review", "weight": 0.85, "type": "leads_to",
+     "rationale": "Refactored code needs review"}
+  ]
+}
