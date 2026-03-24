@@ -6,6 +6,7 @@ import { ScraperCapability } from './ScraperCapability.js';
 import { ShellCapability } from './ShellCapability.js';
 import { FileCapability } from './FileCapability.js';
 import { MemoryCapability } from './MemoryCapability.js';
+import { GUICapability } from './GUICapability.js';
 
 export class CapabilityRegistry {
   private capabilities = new Map<string, Capability>();
@@ -38,6 +39,7 @@ export class CapabilityRegistry {
     this.register(new ScraperCapability());
     this.register(new ShellCapability());
     this.register(new FileCapability());
+    this.register(new GUICapability());
 
     // Memory capability — only available when graph is connected
     if (graph) {

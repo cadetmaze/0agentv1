@@ -1175,7 +1175,28 @@ const rl = createInterface({
 
 // Trigger palette when user types exactly '/' and presses Tab or Enter isn't needed —
 // the completer above handles Tab. For bare '/' + Enter, handled in rl.on('line') below.
+//
+// Escape key: cancel current session (like Ctrl+C but without exiting).
 emitKeypressEvents(process.stdin, rl);
+process.stdin.on('keypress', (_char, key) => {
+  if (!key || _paletteOpen) return;
+  if (key.name === 'escape' && pendingResolve) {
+    // Cancel the running session cleanly
+    process.stdout.write(`\r\x1b[2K\n  ${fmt(C.yellow, '↩')} Cancelled\n`);
+    spinner.stop();
+    if (sessionId) {
+      fetch(`${BASE_URL}/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+    }
+    const res = pendingResolve;
+    pendingResolve = null;
+    sessionId      = null;
+    streaming      = false;
+    streamLineCount = 0;
+    messageQueue.length = 0; // also clear queue — fresh start
+    res();
+    rl.prompt();
+  }
+});
 
 printHeader();
 printInsights();

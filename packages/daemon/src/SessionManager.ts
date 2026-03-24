@@ -571,8 +571,38 @@ export class SessionManager {
    * (name, projects, tech, preferences, URLs) and persist them to the graph.
    * This catches everything the agent didn't explicitly memory_write during execution.
    */
-  private async _extractAndPersistFacts(task: string, output: string, llm: LLMExecutor): Promise<void> {
-    if (!this.graph || !llm.isConfigured) return;
+  private async _extractAndPersistFacts(task: string, output: string, _llm: LLMExecutor): Promise<void> {
+    if (!this.graph) return;
+
+    // Use haiku for extraction — fast + cheap for background summarisation.
+    // Read config fresh so we always have the latest key.
+    let extractLLM: LLMExecutor | undefined;
+    try {
+      const cfgPath = resolve(homedir(), '.0agent', 'config.yaml');
+      if (existsSync(cfgPath)) {
+        const raw  = readFileSync(cfgPath, 'utf8');
+        const cfg  = YAML.parse(raw) as Record<string, unknown>;
+        const prov = (cfg.llm_providers as Array<Record<string,unknown>> | undefined)
+          ?.find(p => p.is_default) ?? (cfg.llm_providers as any)?.[0];
+        if (prov?.api_key && prov.provider === 'anthropic') {
+          extractLLM = new LLMExecutor({
+            provider: 'anthropic',
+            model:    'claude-haiku-4-5-20251001',   // fast + cheap for extraction
+            api_key:  String(prov.api_key),
+          });
+        } else if (prov?.api_key) {
+          // Non-Anthropic provider — use whatever model they have configured
+          extractLLM = new LLMExecutor({
+            provider:  String(prov.provider),
+            model:     String(prov.model),
+            api_key:   String(prov.api_key),
+            base_url:  prov.base_url ? String(prov.base_url) : undefined,
+          });
+        }
+      }
+    } catch {}
+
+    if (!extractLLM?.isConfigured) return;
 
     // Skip trivial / command-only tasks that won't have learnable facts
     const combined = `${task} ${output}`;
