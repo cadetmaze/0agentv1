@@ -563,10 +563,7 @@ async function handleCommand(input) {
         const { execSync: exs } = await import('node:child_process');
         exs('npm install -g 0agent@latest --silent', { stdio: 'ignore', timeout: 120_000 });
         process.stdout.write(`  ${fmt(C.green, '✓')} Updated to ${latest} — restarting...\n\n`);
-        const { spawn: sp } = await import('node:child_process');
-        const child = sp(process.argv[0], process.argv.slice(1), { stdio: 'inherit' });
-        child.on('close', (code) => process.exit(code ?? 0));
-        process.stdin.pause();
+        await restartWithLatest();
       } catch (e) {
         console.log(`  ${fmt(C.red, '✗')} Update failed: ${e.message}\n`);
       }
@@ -887,11 +884,7 @@ async function _safeJsonFetch(url, opts) {
       exs('npm install -g 0agent@latest --silent', { stdio: 'ignore', timeout: 120_000 });
       process.stdout.write(`  ${fmt(C.green, '✓')} Updated to ${latest} — restarting...\n\n`);
 
-      // Restart cleanly
-      const { spawn: sp } = await import('node:child_process');
-      const child = sp(process.argv[0], process.argv.slice(1), { stdio: 'inherit' });
-      child.on('close', (code) => process.exit(code ?? 0));
-      process.stdin.pause();
+      await restartWithLatest();
     } catch {
       // Non-fatal — update failure never crashes the agent
     }
@@ -899,6 +892,35 @@ async function _safeJsonFetch(url, opts) {
 
   rl.prompt();
 })();
+
+// Restart using the GLOBAL install, not the npx cache that's currently running.
+// After `npm install -g 0agent@latest`, the new binary is in npm's global bin dir.
+// Using process.argv would re-run the OLD npx-cached file → infinite loop.
+async function restartWithLatest() {
+  try {
+    const { execSync: ex } = await import('node:child_process');
+    const { resolve: res } = await import('node:path');
+    const { existsSync: ef } = await import('node:fs');
+    const { spawn: sp } = await import('node:child_process');
+
+    // Find the global npm bin directory (e.g. ~/.nvm/.../bin or /usr/local/bin)
+    const globalBin = ex('npm bin -g 2>/dev/null || true', { encoding: 'utf8' }).trim().split('\n')[0];
+    const newBin = globalBin ? res(globalBin, '0agent') : null;
+
+    let child;
+    if (newBin && ef(newBin)) {
+      // Run the freshly installed global script
+      child = sp(process.execPath, [newBin], { stdio: 'inherit' });
+    } else {
+      // Fallback: let the shell find 0agent in PATH
+      child = sp('0agent', [], { stdio: 'inherit', shell: true });
+    }
+    child.on('close', (code) => process.exit(code ?? 0));
+    process.stdin.pause();
+  } catch {
+    process.exit(0); // just exit; user can re-open
+  }
+}
 
 function isNewerVersion(a, b) {
   const pa = a.split('.').map(Number);
