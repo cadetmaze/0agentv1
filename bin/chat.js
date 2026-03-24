@@ -189,6 +189,79 @@ function handleWsEvent(event) {
       lineBuffer += event.token;
       break;
     }
+    case 'runtime.heal_proposal': {
+      // Daemon found a code bug and is proposing a fix — requires human y/n
+      const p = event.proposal ?? {};
+      process.stdout.write('\n');
+      process.stdout.write(`  ${fmt(C.yellow, '🔧 Runtime code bug detected')}\n`);
+      process.stdout.write(`  ${fmt(C.dim, p.error_summary ?? '')}\n`);
+      process.stdout.write(`  ${fmt(C.dim, 'File: ' + (p.location?.relPath ?? 'unknown'))}\n\n`);
+
+      if (p.explanation) {
+        process.stdout.write(`  ${fmt(C.bold, 'Diagnosis:')} ${p.explanation}\n\n`);
+      }
+
+      if (p.diff) {
+        process.stdout.write(`  ${fmt(C.bold, 'Proposed fix:')}\n`);
+        const diffLines = String(p.diff).split('\n');
+        for (const line of diffLines) {
+          if (line.startsWith('-')) process.stdout.write(`  ${fmt(C.red, line)}\n`);
+          else if (line.startsWith('+')) process.stdout.write(`  ${fmt(C.green, line)}\n`);
+          else process.stdout.write(`  ${fmt(C.dim, line)}\n`);
+        }
+        process.stdout.write('\n');
+      }
+
+      const confidence = p.confidence ?? 'medium';
+      const confColor = confidence === 'high' ? C.green : confidence === 'medium' ? C.yellow : C.red;
+      process.stdout.write(`  Confidence: ${fmt(confColor, confidence.toUpperCase())}\n\n`);
+
+      // Ask for approval — use readline in raw mode for single keypress
+      process.stdout.write(`  Apply this fix and restart daemon? ${fmt(C.bold, '[y/N]')} `);
+
+      const handleHealApproval = async (key) => {
+        process.stdin.removeListener('keypress', handleHealApproval);
+        const answer = key?.toLowerCase() ?? 'n';
+        process.stdout.write(answer + '\n\n');
+
+        if (answer === 'y') {
+          // Store proposal then approve
+          await fetch(`${BASE_URL}/api/runtime/proposals`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(p),
+          }).catch(() => {});
+
+          const approveRes = await fetch(`${BASE_URL}/api/runtime/proposals/${p.proposal_id}/approve`, {
+            method: 'POST',
+          }).catch(() => null);
+          const data = approveRes?.ok ? await approveRes.json().catch(() => null) : null;
+
+          if (data?.applied) {
+            process.stdout.write(`  ${fmt(C.green, '✓')} Patch applied. ${data.message}\n`);
+            process.stdout.write(`  ${fmt(C.dim, 'Daemon restarting — reconnecting in 5s...')}\n\n`);
+          } else {
+            process.stdout.write(`  ${fmt(C.red, '✗')} Could not apply: ${data?.message ?? 'unknown error'}\n\n`);
+            rl.prompt();
+          }
+        } else {
+          await fetch(`${BASE_URL}/api/runtime/proposals/${p.proposal_id}`, { method: 'DELETE' }).catch(() => {});
+          process.stdout.write(`  ${fmt(C.dim, 'Fix rejected. The bug remains.')}\n\n`);
+          rl.prompt();
+        }
+      };
+
+      // Listen for a single keypress
+      if (process.stdin.isTTY) {
+        process.stdin.once('data', (buf) => {
+          handleHealApproval(buf.toString().trim().toLowerCase());
+        });
+      } else {
+        rl.once('line', (line) => handleHealApproval(line.trim().toLowerCase()));
+      }
+      break;
+    }
+
     case 'schedule.fired': {
       // Show when a scheduled job fires — even if user is idle
       const ts = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });

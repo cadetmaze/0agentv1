@@ -1,6 +1,8 @@
 import type { LLMExecutor } from './LLMExecutor.js';
 import { AgentExecutor, type AgentExecutorConfig } from './AgentExecutor.js';
 import { ExecutionVerifier, type VerificationResult, type AgentResult } from './ExecutionVerifier.js';
+import { isRuntimeBug } from './RuntimeSelfHeal.js';
+import type { RuntimeSelfHeal } from './RuntimeSelfHeal.js';
 
 export interface HealAttempt {
   attempt_number: number;
@@ -23,6 +25,7 @@ export class SelfHealLoop {
     private onStep: (step: string) => void,
     private onToken: (token: string) => void,
     private maxAttempts: number = 3,
+    private runtimeHealer?: RuntimeSelfHeal,
   ) {
     this.verifier = new ExecutionVerifier(config.cwd);
   }
@@ -64,6 +67,18 @@ export class SelfHealLoop {
     // All attempts exhausted or not retryable
     if (!lastVerification.success) {
       this.onStep(`⚠ Verification: ${lastVerification.details}`);
+    }
+
+    // Check if the final error looks like a runtime code bug — offer self-heal
+    const lastError = finalResult?.output ?? '';
+    if (this.runtimeHealer && isRuntimeBug(lastError)) {
+      this.onStep('🔧 This looks like a runtime code bug — analyzing for self-fix...');
+      this.runtimeHealer.analyze(lastError, 'session task').then(proposal => {
+        if (proposal) {
+          this.onStep(`🔧 Fix proposed for ${proposal.location.relPath}:${proposal.location.line} — awaiting your approval in terminal`);
+          this.runtimeHealer!.emitProposal(proposal);
+        }
+      }).catch(() => {});
     }
 
     return { ...finalResult!, heal_attempts: attempts, healed: false };

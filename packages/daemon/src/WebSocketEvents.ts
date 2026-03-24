@@ -33,7 +33,11 @@ export type DaemonEvent =
   // ─── Scheduler ────────────────────────────────────────────────────────────
   | { type: 'schedule.fired'; job_id: string; job_name: string; task: string; run_count: number }
   | { type: 'schedule.completed'; job_id: string; session_id: string }
-  | { type: 'schedule.error'; job_id: string; error: string };
+  | { type: 'schedule.error'; job_id: string; error: string }
+  // ─── Runtime self-heal ────────────────────────────────────────────────────
+  | { type: 'runtime.heal_proposal'; proposal: Record<string, unknown> }
+  | { type: 'runtime.heal_applied'; proposal_id: string; message: string }
+  | { type: 'runtime.heal_rejected'; proposal_id: string };
 
 export type EventHandler = (event: DaemonEvent) => void;
 

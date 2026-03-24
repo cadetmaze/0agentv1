@@ -44,6 +44,7 @@ import { TeamSync } from './TeamSync.js';
 import { GitHubMemorySync } from './GitHubMemorySync.js';
 import { CodespaceManager } from './CodespaceManager.js';
 import { SchedulerManager } from './SchedulerManager.js';
+import { RuntimeSelfHeal } from './RuntimeSelfHeal.js';
 import type { DaemonStatus } from './routes/health.js';
 
 // ─── Types ───────────────────────────────────────────
@@ -70,6 +71,7 @@ export class ZeroAgentDaemon {
   private proactiveSurfaceInstance: unknown = null;
   private codespaceManager: CodespaceManager | null = null;
   private schedulerManager: SchedulerManager | null = null;
+  private runtimeHealer: RuntimeSelfHeal | null = null;
   private startedAt: number = 0;
   private pidFilePath: string;
 
@@ -210,6 +212,27 @@ export class ZeroAgentDaemon {
       // Collab-2 not yet built — skip silently
     }
 
+    // 6.7 — Runtime self-healer (needs LLM + eventBus)
+    if (llmExecutor?.isConfigured) {
+      this.runtimeHealer = new RuntimeSelfHeal(llmExecutor, this.eventBus);
+      // Catch unhandled exceptions and offer to self-heal
+      process.on('uncaughtException', (err) => {
+        const stack = err.stack ?? err.message;
+        console.error('[0agent] Uncaught exception:', stack);
+        this.runtimeHealer?.analyze(stack, 'daemon runtime').then(proposal => {
+          if (proposal && this.eventBus) {
+            this.runtimeHealer?.emitProposal(proposal);
+            // Also store it so /api/runtime/proposals returns it
+            fetch(`http://127.0.0.1:${this.config!.server.port}/api/runtime/proposals`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(proposal),
+            }).catch(() => {});
+          }
+        }).catch(() => {});
+      });
+    }
+
     // 6.8 — Scheduler: create after sessionManager (needs it to fire jobs)
     this.schedulerManager = new SchedulerManager(this.adapter, this.sessionManager, this.eventBus);
     this.schedulerManager.start();
@@ -244,6 +267,7 @@ export class ZeroAgentDaemon {
       proactiveSurface: proactiveSurface as any,
       getCodespaceManager: () => this.codespaceManager,
       scheduler: this.schedulerManager,
+      healer: this.runtimeHealer,
       setupCodespace: async () => {
         if (!this.codespaceManager) return { started: false, error: 'GitHub memory not configured. Run: 0agent memory connect github' };
         try {

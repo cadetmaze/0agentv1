@@ -36,7 +36,9 @@ import { memoryRoutes } from './routes/memory.js';
 import { llmRoutes } from './routes/llm.js';
 import { codespaceRoutes } from './routes/codespace.js';
 import { scheduleRoutes } from './routes/schedule.js';
+import { runtimeRoutes } from './routes/runtime.js';
 import type { SchedulerManager } from './SchedulerManager.js';
+import type { RuntimeSelfHeal } from './RuntimeSelfHeal.js';
 import type { CodespaceManager } from './CodespaceManager.js';
 import type { SessionManager } from './SessionManager.js';
 import type { SkillRegistry } from './SkillRegistry.js';
@@ -56,6 +58,7 @@ export interface HTTPServerDeps {
   getCodespaceManager?: () => CodespaceManager | null;
   setupCodespace?: () => Promise<{ started: boolean; error?: string }>;
   scheduler?: SchedulerManager | null;
+  healer?: RuntimeSelfHeal | null;
 }
 
 export class HTTPServer {
@@ -79,6 +82,7 @@ export class HTTPServer {
     this.app.route('/api/memory',   memoryRoutes({ getSync: deps.getMemorySync ?? (() => null) }));
     this.app.route('/api/llm',      llmRoutes());
     this.app.route('/api/schedule',  scheduleRoutes({ scheduler: deps.scheduler ?? null }));
+    this.app.route('/api/runtime',   runtimeRoutes({ healer: deps.healer ?? null }));
     this.app.route('/api/codespace', codespaceRoutes({
       getManager: deps.getCodespaceManager ?? (() => null),
       setup: deps.setupCodespace ?? (async () => ({ started: false, error: 'Not configured' })),
