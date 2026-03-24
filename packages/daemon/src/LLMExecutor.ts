@@ -214,6 +214,10 @@ export class LLMExecutor {
     });
 
     if (!res.ok) {
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get('retry-after') ?? res.headers.get('x-ratelimit-reset-requests') ?? '30', 10);
+        throw new Error(`RateLimit:${Math.min(retryAfter, 120)}`);
+      }
       const err = await res.text();
       throw new Error(`Anthropic ${res.status}: ${err}`);
     }
@@ -354,6 +358,10 @@ export class LLMExecutor {
     });
 
     if (!res.ok) {
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get('retry-after') ?? '30', 10);
+        throw new Error(`RateLimit:${Math.min(retryAfter, 120)}`);
+      }
       const err = await res.text();
       throw new Error(`OpenAI ${res.status}: ${err}`);
     }

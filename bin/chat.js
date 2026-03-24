@@ -753,6 +753,7 @@ async function runTask(input) {
       try {
         const r = await fetch(`${BASE_URL}/api/sessions/${sid}`, { signal: AbortSignal.timeout(2000) });
         const session = await r.json();
+        globalThis._daemonMisses = 0; // daemon responded — reset miss counter
 
         // Show any new steps not yet shown via WS
         const steps = session.steps ?? [];
@@ -789,7 +790,26 @@ async function runTask(input) {
           resolve_?.();
           drainQueue(); // auto-process queued messages
         }
-      } catch {}
+      } catch {
+        // Daemon not responding — track misses
+        if (typeof _daemonMisses === 'undefined') globalThis._daemonMisses = 0;
+        globalThis._daemonMisses = (globalThis._daemonMisses ?? 0) + 1;
+        if (globalThis._daemonMisses >= 4) {
+          globalThis._daemonMisses = 0;
+          clearInterval(pollTimer);
+          spinner.stop();
+          process.stdout.write(`\r\x1b[2K\n  ${fmt(C.yellow, '⚠')}  Daemon stopped — restarting…\n\n`);
+          const r = await _spawnDaemon();
+          if (r === 'ok') {
+            process.stdout.write(`  ${fmt(C.green, '✓')} Daemon restarted. Re-send your message.\n\n`);
+          } else {
+            process.stdout.write(`  ${fmt(C.red, '✗')} Could not restart daemon. Run: ${fmt(C.dim, '0agent start')}\n\n`);
+          }
+          if (pendingResolve) { pendingResolve(); pendingResolve = null; }
+          sessionId = null; streaming = false; streamLineCount = 0;
+          rl.prompt();
+        }
+      }
     }, 800);
 
     return new Promise(resolve => { pendingResolve = resolve; });

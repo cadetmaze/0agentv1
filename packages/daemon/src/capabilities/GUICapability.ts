@@ -154,11 +154,17 @@ export class GUICapability implements Capability {
         return { success: false, output: result.stderr.trim() || 'Unknown error after install', duration_ms: Date.now() - start };
       }
 
-      // macOS accessibility permission error
+      // macOS accessibility permission error — auto-open System Settings
       if (err.includes('accessibility') || err.includes('permission') || err.includes('AXIsProcessTrusted')) {
+        if (platform() === 'darwin') {
+          spawnSync('open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'], { timeout: 3000 });
+        }
         return {
           success: false,
-          output: 'macOS accessibility permission required. Go to: System Preferences → Privacy & Security → Accessibility → add Terminal (or the app running 0agent)',
+          output: 'macOS Accessibility permission required for GUI automation.\n' +
+            '→ System Settings has been opened automatically.\n' +
+            '→ Go to: Privacy & Security → Accessibility → enable Terminal (or iTerm2 / the app running 0agent)\n' +
+            '→ Then re-run your task.',
           duration_ms: Date.now() - start,
         };
       }
@@ -357,19 +363,32 @@ for i, word in enumerate(data['text']):
         cy = data['top'][i] + data['height'][i] // 2
         found.append((cx, cy, word))
 
-try:
-    if found:
-        cx, cy, word = found[0]
-        pyautogui.click(cx, cy, duration=${duration})
-        print(f"Found '{word}' at ({cx},{cy}) — clicked")
+if found:
+    cx, cy, word = found[0]
+    pyautogui.click(cx, cy, duration=${duration})
+    print(f"Found '{word}' at ({cx},{cy}) — clicked")
+else:
+    # Retry once after a brief wait (element may still be loading)
+    time.sleep(1.5)
+    img2 = pyautogui.screenshot()
+    data2 = pytesseract.image_to_data(img2, output_type=pytesseract.Output.DICT)
+    found2 = []
+    for i, word in enumerate(data2['text']):
+        if target in word.lower() and int(data2['conf'][i]) > 40:
+            cx2 = data2['left'][i] + data2['width'][i] // 2
+            cy2 = data2['top'][i] + data2['height'][i] // 2
+            found2.append((cx2, cy2, word))
+    if found2:
+        cx2, cy2, word2 = found2[0]
+        pyautogui.click(cx2, cy2, duration=${duration})
+        print(f"Found '{word2}' at ({cx2},{cy2}) after retry — clicked")
     else:
-        print(f"Text '${safeText}' not found on screen. Take a screenshot to see current state.")
+        print(f"Text '${safeText}' not found on screen after retry. Take a screenshot to see what changed.")
         sys.exit(1)
-finally:
-    try:
-        os.remove(shot_path)
-    except Exception:
-        pass
+try:
+    os.remove(shot_path)
+except Exception:
+    pass
 `;
       }
 

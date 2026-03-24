@@ -23,6 +23,9 @@ export class ShellCapability implements Capability {
   // re-open apps (e.g. Brave) on every login or on a timer.
   private static PERSISTENT_TASK_PATTERN = /crontab\s+-[eilr]|launchctl\s+load|launchctl\s+bootstrap|systemctl\s+enable|at\s+\d|make\s+login\s+item|LaunchAgents|LaunchDaemons|loginitems/i;
 
+  // Commands that make irreversible external state changes — require explicit user confirmation
+  private static DESTRUCTIVE_PATTERN = /\bcurl\s+[^|&]*-[A-Za-z]*[XD]\s+(DELETE|POST|PUT|PATCH)\b|\bcurl\s+[^|&]*--(request|data)[=\s]+(DELETE|POST|PUT|PATCH)\b|rm\s+-[rf]{1,3}\s+[^|&;]{3}|DROP\s+TABLE|DELETE\s+FROM\s+\w/i;
+
   async execute(input: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<CapabilityResult> {
     let command = String(input.command ?? '');
     const timeout = Number(input.timeout_ms ?? 30_000);
@@ -36,6 +39,16 @@ export class ShellCapability implements Capability {
         output: `Blocked: "${command.slice(0, 80)}" creates a persistent scheduled task (cron/launchd/login item). ` +
           `These survive uninstall and can keep launching apps autonomously. ` +
           `Ask the user explicitly before scheduling any persistent OS task.`,
+        duration_ms: 0,
+      };
+    }
+
+    // Require explicit confirmation before irreversible external mutations
+    if (ShellCapability.DESTRUCTIVE_PATTERN.test(command)) {
+      return {
+        success: false,
+        output: `CONFIRM_REQUIRED: The command "${command.slice(0, 100)}" will make an irreversible change. ` +
+          `Tell the user exactly what this will do and ask them to reply with explicit confirmation before you run it.`,
         duration_ms: 0,
       };
     }

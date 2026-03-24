@@ -88,6 +88,8 @@ export class AgentExecutor {
         break;
       }
       this.onStep(i === 0 ? 'Thinking…' : 'Continuing…');
+      // Compress history if getting too long to avoid context overflow
+      if (messages.length > 28) this._compressHistory(messages);
 
       let response!: LLMResponse;
       let llmFailed = false;
@@ -109,6 +111,14 @@ export class AgentExecutor {
             break; // success
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
+            const isRateLimit = /RateLimit:\d+/.test(msg);
+            if (isRateLimit) {
+              const waitSec = parseInt(msg.split(':')[1] ?? '30', 10);
+              const waitMs = Math.min(waitSec * 1000, 120_000);
+              this.onStep(`Rate limited — waiting ${waitSec}s before retry…`);
+              await new Promise(r => setTimeout(r, waitMs));
+              continue; // don't count against llmRetry limit
+            }
             const isTimeout = /timeout|AbortError|aborted/i.test(msg);
             if (isTimeout && llmRetry < 2) {
               llmRetry++;
@@ -153,6 +163,11 @@ export class AgentExecutor {
         try {
           const capResult = await this.registry.execute(tc.name, tc.input, this.cwd, signal);
           result = capResult.output;
+          // Cap tool output to prevent context overflow
+          const MAX_TOOL_OUTPUT = 4000;
+          if (result.length > MAX_TOOL_OUTPUT) {
+            result = result.slice(0, MAX_TOOL_OUTPUT) + `\n[...${result.length - MAX_TOOL_OUTPUT} chars truncated]`;
+          }
           if (capResult.fallback_used) {
             this.onStep(`  (used fallback: ${capResult.fallback_used})`);
           }
@@ -424,6 +439,9 @@ export class AgentExecutor {
       `- For research tasks: use web_search first, then scrape_url for full page content`,
       `- Use relative paths from the working directory`,
       `- Be concise in your final response: state what was done and where to find it`,
+      `- For tasks with 3+ distinct steps or multiple apps/services, BRIEFLY LIST the steps first, then execute one at a time`,
+      `- CONFIRM BEFORE SENDING: Before sending any message (WhatsApp, email, Slack, SMS, tweet), show the user the exact text and recipient and wait for explicit confirmation`,
+      `- CONFIRM BEFORE DELETING: Before deleting files, database records, or any data, state what will be deleted and confirm with the user`,
       ``,
       `═══ EXECUTION DISCIPLINE — follow strictly ═══`,
       `- SEQUENTIAL: complete each step fully before starting the next. Never start step 2 while step 1 is still in progress.`,
@@ -494,6 +512,24 @@ export class AgentExecutor {
 
     if (extra) lines.push(``, `Context:`, extra);
     return lines.join('\n');
+  }
+
+  private _compressHistory(messages: LLMMessage[]): void {
+    // Keep first user message + last 14 messages; summarise the middle
+    const KEEP_TAIL = 14;
+    if (messages.length <= KEEP_TAIL + 2) return;
+    const head = messages.slice(0, 1);
+    const tail = messages.slice(-KEEP_TAIL);
+    const middle = messages.slice(1, -KEEP_TAIL);
+    const toolResults = middle
+      .filter(m => m.role === 'tool')
+      .map(m => String(m.content).slice(0, 120).replace(/\n/g, ' '))
+      .join(' | ');
+    const summary: LLMMessage = {
+      role: 'user',
+      content: `[Earlier context compressed — ${middle.length} messages. Key tool results: ${toolResults.slice(0, 600)}]`,
+    };
+    messages.splice(0, messages.length, ...head, summary, ...tail);
   }
 
   /** Returns true if task is a self-modification request. Self-mod tasks get longer LLM timeouts. */
