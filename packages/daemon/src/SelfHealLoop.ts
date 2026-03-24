@@ -30,20 +30,21 @@ export class SelfHealLoop {
     this.verifier = new ExecutionVerifier(config.cwd);
   }
 
-  async executeWithHealing(task: string, systemContext?: string): Promise<HealResult> {
+  async executeWithHealing(task: string, systemContext?: string, signal?: AbortSignal): Promise<HealResult> {
     const attempts: HealAttempt[] = [];
     let currentContext = systemContext;
     let finalResult: AgentResult | null = null;
     let lastVerification: VerificationResult = { success: true, method: 'none', details: '', retryable: false, elapsed_ms: 0 };
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
+      if (signal?.aborted) break;
       // First attempt: no special step. Retries: emit heal_attempt step.
       if (attempt > 1) {
         this.onStep(`↺ Self-healing (attempt ${attempt}/${this.maxAttempts}): ${lastVerification.details}`);
       }
 
       const executor = new AgentExecutor(this.llm, this.config, this.onStep, this.onToken);
-      const result = await executor.execute(task, currentContext);
+      const result = await executor.execute(task, currentContext, signal);
       finalResult = result;
 
       // Verify

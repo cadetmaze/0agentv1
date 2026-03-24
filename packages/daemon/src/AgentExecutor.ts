@@ -62,7 +62,7 @@ export class AgentExecutor {
     this.registry = new CapabilityRegistry(undefined, config.graph, config.onMemoryWrite);
   }
 
-  async execute(task: string, systemContext?: string): Promise<AgentResult> {
+  async execute(task: string, systemContext?: string, signal?: AbortSignal): Promise<AgentResult> {
     const filesWritten: string[] = [];
     const commandsRun: string[] = [];
     let totalTokens = 0;
@@ -83,9 +83,13 @@ export class AgentExecutor {
     let finalOutput = '';
 
     for (let i = 0; i < this.maxIterations; i++) {
+      if (signal?.aborted) {
+        finalOutput = 'Cancelled.';
+        break;
+      }
       this.onStep(i === 0 ? 'Thinking…' : 'Continuing…');
 
-      let response: LLMResponse;
+      let response!: LLMResponse;
       let llmFailed = false;
       {
         let llmRetry = 0;
@@ -100,6 +104,7 @@ export class AgentExecutor {
                 this.onToken(token);
                 finalOutput += token;
               },
+              signal,
             );
             break; // success
           } catch (err) {

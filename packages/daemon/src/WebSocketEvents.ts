@@ -43,6 +43,7 @@ export type EventHandler = (event: DaemonEvent) => void;
 
 export interface IEventBus {
   emit(event: Record<string, unknown>): void;
+  onEvent(handler: EventHandler): () => void;
 }
 
 // ─── WebSocketEventBus ───────────────────────────────

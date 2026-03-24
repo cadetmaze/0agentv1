@@ -138,14 +138,15 @@ export class LLMExecutor {
     tools: ToolDefinition[],
     system?: string,
     onToken?: (token: string) => void,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     switch (this.config.provider) {
-      case 'anthropic': return this.anthropic(messages, tools, system, onToken);
-      case 'openai':    return this.openai(messages, tools, system, onToken);
-      case 'xai':       return this.openai(messages, tools, system, onToken, 'https://api.x.ai/v1');
-      case 'gemini':    return this.openai(messages, tools, system, onToken, 'https://generativelanguage.googleapis.com/v1beta/openai');
+      case 'anthropic': return this.anthropic(messages, tools, system, onToken, signal);
+      case 'openai':    return this.openai(messages, tools, system, onToken, undefined, signal);
+      case 'xai':       return this.openai(messages, tools, system, onToken, 'https://api.x.ai/v1', signal);
+      case 'gemini':    return this.openai(messages, tools, system, onToken, 'https://generativelanguage.googleapis.com/v1beta/openai', signal);
       case 'ollama':    return this.ollama(messages, system, onToken);
-      default:          return this.openai(messages, tools, system, onToken);
+      default:          return this.openai(messages, tools, system, onToken, undefined, signal);
     }
   }
 
@@ -156,6 +157,7 @@ export class LLMExecutor {
     tools: ToolDefinition[],
     system?: string,
     onToken?: (token: string) => void,
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const sysContent = system ?? messages.find(m => m.role === 'system')?.content;
     const filtered = messages.filter(m => m.role !== 'system');
@@ -208,7 +210,7 @@ export class LLMExecutor {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),  // 60s timeout
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
     });
 
     if (!res.ok) {
@@ -304,6 +306,7 @@ export class LLMExecutor {
     system?: string,
     onToken?: (token: string) => void,
     baseUrl = 'https://api.openai.com/v1',
+    signal?: AbortSignal,
   ): Promise<LLMResponse> {
     const allMessages: Record<string, unknown>[] = [];
     const sysContent = system ?? messages.find(m => m.role === 'system')?.content;
@@ -347,7 +350,7 @@ export class LLMExecutor {
         'Authorization': `Bearer ${this.config.api_key}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
     });
 
     if (!res.ok) {

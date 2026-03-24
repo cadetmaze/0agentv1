@@ -18,6 +18,7 @@
  *   drag            — drag from (x,y) to (to_x, to_y)
  *   find_and_click  — OCR-find text on screen and click it
  *   get_screen_size — return screen width × height
+ *   get_cursor_pos  — return current mouse cursor position (x, y)
  *   open_app        — open an application by name (macOS/Linux)
  */
 
@@ -37,7 +38,9 @@ export class GUICapability implements Capability {
       'Automate desktop GUI interactions. ' +
       'Take screenshots to see the current screen state, click on buttons/links/fields, ' +
       'type text, press keyboard shortcuts, scroll, open apps. ' +
-      'Always start with action="screenshot" to see what is on screen before clicking.',
+      'IMPORTANT: Limit screenshots to at most 3 per task — avoid re-screenshotting if you already know the layout. ' +
+      'Prefer targeted actions (click, find_and_click, hotkey) over repeated screenshots. ' +
+      'Use get_cursor_pos to check cursor position without a full screenshot.',
     input_schema: {
       type: 'object',
       properties: {
@@ -46,7 +49,7 @@ export class GUICapability implements Capability {
           description:
             '"screenshot" | "click" | "double_click" | "right_click" | "move" | ' +
             '"type" | "hotkey" | "scroll" | "drag" | "find_and_click" | ' +
-            '"get_screen_size" | "open_app"',
+            '"get_screen_size" | "get_cursor_pos" | "open_app"',
         },
         x:         { type: 'number',  description: 'X coordinate (pixels from left)' },
         y:         { type: 'number',  description: 'Y coordinate (pixels from top)' },
@@ -70,7 +73,7 @@ export class GUICapability implements Capability {
 
     const script = this._buildScript(action, input);
     if (!script) {
-      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, open_app`, duration_ms: 0 };
+      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, open_app`, duration_ms: 0 };
     }
 
     // Write to a temp file so we don't hit inline quoting limits
@@ -151,6 +154,12 @@ w, h = pyautogui.size()
 print(f"Screen size: {w} x {h}")
 `;
 
+      case 'get_cursor_pos':
+        return header + `
+x, y = pyautogui.position()
+print(f"Cursor position: ({x}, {y})")
+`;
+
       case 'screenshot': {
         // Take screenshot and OCR it to return what's on screen
         return header + `
@@ -190,10 +199,13 @@ try:
         print("\\n".join(hits[:40]))
 except ImportError:
     print("(pytesseract not installed — install it for OCR: pip3 install pytesseract)")
-    print(f"Screenshot saved: {shot_path}")
 except Exception as e:
     print(f"OCR failed: {e}")
-    print(f"Screenshot saved: {shot_path}")
+finally:
+    try:
+        os.remove(shot_path)
+    except Exception:
+        pass
 `;
       }
 
@@ -294,13 +306,19 @@ for i, word in enumerate(data['text']):
         cy = data['top'][i] + data['height'][i] // 2
         found.append((cx, cy, word))
 
-if found:
-    cx, cy, word = found[0]
-    pyautogui.click(cx, cy, duration=${duration})
-    print(f"Found '{word}' at ({cx},{cy}) — clicked")
-else:
-    print(f"Text '${safeText}' not found on screen. Take a screenshot to see current state.")
-    sys.exit(1)
+try:
+    if found:
+        cx, cy, word = found[0]
+        pyautogui.click(cx, cy, duration=${duration})
+        print(f"Found '{word}' at ({cx},{cy}) — clicked")
+    else:
+        print(f"Text '${safeText}' not found on screen. Take a screenshot to see current state.")
+        sys.exit(1)
+finally:
+    try:
+        os.remove(shot_path)
+    except Exception:
+        pass
 `;
       }
 

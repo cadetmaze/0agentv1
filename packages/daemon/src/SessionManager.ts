@@ -78,6 +78,7 @@ export interface SessionManagerDeps {
 
 export class SessionManager {
   private sessions: Map<string, Session> = new Map();
+  private abortControllers: Map<string, AbortController> = new Map();
   private inferenceEngine?: IInferenceEngine;
   private eventBus?: IEventBus;
   private graph?: KnowledgeGraph;
@@ -228,6 +229,13 @@ export class SessionManager {
     session.completed_at = Date.now();
     session.error = 'cancelled';
 
+    // Abort any in-flight LLM call for this session
+    const controller = this.abortControllers.get(id);
+    if (controller) {
+      controller.abort();
+      this.abortControllers.delete(id);
+    }
+
     this.emit({
       type: 'session.failed',
       session_id: id,
@@ -300,6 +308,10 @@ export class SessionManager {
    * All callers must have created the session first.
    */
   private async _executeSession(sessionId: string, enrichedReq: CreateSessionRequest): Promise<Session> {
+    const abortController = new AbortController();
+    this.abortControllers.set(sessionId, abortController);
+    const signal = abortController.signal;
+
     try {
       await this.startSession(sessionId);
 
@@ -400,10 +412,10 @@ export class SessionManager {
             (step) => this.addStep(sessionId, step),
             (token) => this.emit({ type: 'session.token', session_id: sessionId, token }),
           );
-          agentResult = await healLoop.executeWithHealing(enrichedReq.task, systemContext);
+          agentResult = await healLoop.executeWithHealing(enrichedReq.task, systemContext, signal);
         } catch {
           // SelfHealLoop not yet available — use bare executor
-          agentResult = await executor.execute(enrichedReq.task, systemContext);
+          agentResult = await executor.execute(enrichedReq.task, systemContext, signal);
         }
 
         // ── Store conversation exchange (makes follow-up requests work) ──────
@@ -507,6 +519,8 @@ export class SessionManager {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       this.failSession(sessionId, message);
+    } finally {
+      this.abortControllers.delete(sessionId);
     }
 
     return this.sessions.get(sessionId)!;
@@ -627,7 +641,7 @@ User: ${task.slice(0, 600)}
 Agent: ${output.slice(0, 500)}`;
 
     try {
-      const resp = await llm.complete(
+      const resp = await extractLLM.complete(
         [{ role: 'user', content: prompt }],
         'You are a memory extraction system. Be concise. Extract only factual, durable information. Return valid JSON only.'
       );
