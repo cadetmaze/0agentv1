@@ -130,6 +130,117 @@ const C = {
 const fmt = (color, text) => `${color}${text}${C.reset}`;
 const clearLine = () => process.stdout.write('\r\x1b[2K');
 
+// ─── Markdown renderer ────────────────────────────────────────────────────────
+// Applied to the full streamed response at session.completed — rewrites raw
+// LLM output with ANSI formatting (bold, code, headers, bullets).
+function renderMarkdown(text) {
+  const lines = text.split('\n');
+  const out   = [];
+  let inCode  = false;
+  let codeLang = '';
+
+  for (const raw of lines) {
+    if (raw.startsWith('```')) {
+      inCode = !inCode;
+      codeLang = inCode ? raw.slice(3).trim() : '';
+      if (!inCode) out.push(''); // blank after code block
+      continue;
+    }
+    if (inCode) {
+      out.push(`  \x1b[36m${raw}\x1b[0m`);
+      continue;
+    }
+
+    let line = raw;
+
+    // Headers
+    if      (line.startsWith('### ')) line = `\x1b[1m${line.slice(4)}\x1b[0m`;
+    else if (line.startsWith('## '))  line = `\x1b[1;4m${line.slice(3)}\x1b[0m`;
+    else if (line.startsWith('# '))   line = `\x1b[1;4m${line.slice(2)}\x1b[0m`;
+    // Bullets
+    else if (/^[-*] /.test(line))     line = `  \x1b[36m·\x1b[0m ${line.slice(2)}`;
+    else if (/^\d+\. /.test(line))    line = `  ${line}`;
+    // Horizontal rule
+    else if (/^-{3,}$/.test(line))    line = `\x1b[2m${'─'.repeat(54)}\x1b[0m`;
+
+    // Inline: bold, code, italic
+    line = line
+      .replace(/\*\*([^*\n]+)\*\*/g, '\x1b[1m$1\x1b[0m')
+      .replace(/`([^`\n]+)`/g,        '\x1b[36m$1\x1b[0m')
+      .replace(/\*([^*\s][^*\n]*)\*/g,'\x1b[3m$1\x1b[0m');
+
+    out.push('  ' + line);
+  }
+  return out.join('\n');
+}
+
+// ─── Step formatter ───────────────────────────────────────────────────────────
+// Converts raw step labels from AgentExecutor into icon + clean readable form.
+function formatStep(step) {
+  const ICONS = {
+    shell_exec:   `\x1b[33m⚡\x1b[0m`,
+    file_op:      `\x1b[34m◈\x1b[0m`,
+    web_search:   `\x1b[35m⌕\x1b[0m`,
+    scrape_url:   `\x1b[35m◎\x1b[0m`,
+    memory_write: `\x1b[32m◆\x1b[0m`,
+    browser_open: `\x1b[34m◉\x1b[0m`,
+  };
+
+  // Tool call: "▶ shell_exec("cmd")"
+  const toolMatch = step.match(/^▶\s+(\w+)\((.{0,100})\)/);
+  if (toolMatch) {
+    const [, tool, args] = toolMatch;
+    const icon = ICONS[tool] ?? fmt(C.dim, '›');
+    const clean = args.replace(/^["'](.*)["']$/, '$1').replace(/\\n/g, ' ').slice(0, 72);
+    return `  ${icon} \x1b[2m${clean}\x1b[0m`;
+  }
+
+  // Result: "  ↳ text"
+  if (/^\s*↳/.test(step)) {
+    const text = step.replace(/^\s*↳\s*/, '');
+    return `    \x1b[2m↳ ${text.slice(0, 100)}\x1b[0m`;
+  }
+
+  // Thinking / Continuing (suppress — replaced by startSession static status)
+  if (/^(Thinking|Continuing)/.test(step)) return null;
+
+  // Summary lines (Done, Files written, Commands run)
+  if (/^(Done|Files|Commands)/.test(step))
+    return `  \x1b[2m${step}\x1b[0m`;
+
+  return `  \x1b[2m› ${step}\x1b[0m`;
+}
+
+// ─── Cost estimator ───────────────────────────────────────────────────────────
+function estimateCost(model, tokens) {
+  const RATES = { // $ per 1M tokens (blended in+out)
+    'claude-sonnet-4-6': 4.0, 'claude-opus-4-6': 22.0, 'claude-haiku-4-5': 0.5,
+    'gpt-4o': 5.0, 'gpt-4o-mini': 0.2, 'grok-3': 3.0,
+    'gemini-2.0-flash': 0.12, 'gemini-2.0-pro': 3.5,
+  };
+  if (!model || !tokens) return '';
+  const key = Object.keys(RATES).find(k => String(model).includes(k));
+  if (!key) return '';
+  const usd = (tokens / 1_000_000) * RATES[key];
+  return usd < 0.01 ? ' · <$0.01' : ` · $${usd.toFixed(3)}`;
+}
+
+// ─── OS notification ──────────────────────────────────────────────────────────
+async function notifyDone(task, success) {
+  try {
+    const { execSync } = await import('node:child_process');
+    const title = success ? '0agent ✓' : '0agent ✗';
+    const body  = task.replace(/'/g, '').slice(0, 80);
+    if (process.platform === 'darwin') {
+      execSync(`osascript -e 'display notification "${body}" with title "${title}"'`,
+               { stdio: 'ignore', timeout: 3000 });
+    } else if (process.platform === 'linux') {
+      execSync(`notify-send "${title}" "${body}" 2>/dev/null`,
+               { stdio: 'ignore', timeout: 3000 });
+    }
+  } catch {}
+}
+
 // ─── LLM ping — direct 1-token call, bypasses daemon, instant ────────────────
 async function pingLLM(provider) {
   const key   = provider.api_key ?? '';
@@ -195,25 +306,30 @@ function getCurrentProvider(cfg) {
 }
 
 // ─── State ────────────────────────────────────────────────────────────────────
-let cfg         = loadConfig();
+let cfg            = loadConfig();
 let sessionId      = null;
 const messageQueue = [];       // queued tasks while session is running
 let lastFailedTask = null;     // for retry-on-abort
 let streaming      = false;
+let streamLineCount = 0;       // newlines printed during streaming (for re-render)
 let ws             = null;
 let wsReady        = false;
 let pendingResolve = null;
 let lineBuffer     = '';
+let currentTask    = '';       // task being executed (for notifications)
+let sessionStartMs = 0;        // when current session started (for elapsed time)
 const spinner      = new Spinner('Thinking');
-const history   = [];    // command history for arrow keys
+const history      = [];       // command history for arrow keys
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 function printHeader() {
   const provider = getCurrentProvider(cfg);
   const modelStr = provider ? `${provider.provider}/${provider.model}` : 'no model';
+  const ws       = cfg?.workspace?.path ?? null;
   console.log();
-  console.log(fmt(C.bold, '  0agent') + fmt(C.dim, ` — ${modelStr}`));
-  console.log(fmt(C.dim, '  Type a task or /command — press Tab to browse, / to see all.\n'));
+  console.log(`  ${fmt(C.bold, '0agent')} ${fmt(C.dim, '·')} ${fmt(C.cyan, modelStr)}`);
+  if (ws) console.log(fmt(C.dim, `  ${ws}`));
+  console.log(fmt(C.dim, '\n  Type a task, or / for commands.\n'));
 }
 
 function printInsights() {
@@ -252,23 +368,26 @@ function handleWsEvent(event) {
   switch (event.type) {
     case 'session.step': {
       spinner.stop();
-      if (streaming) { process.stdout.write('\n'); streaming = false; }
-      // Clear current readline line, print step, then restore › prompt
-      process.stdout.write('\r\x1b[2K');
-      console.log(`  ${fmt(C.dim, '›')} ${event.step}`);
+      if (streaming) { process.stdout.write('\n'); streaming = false; streamLineCount = 0; }
+      const formatted = formatStep(event.step);
+      if (formatted !== null) {
+        process.stdout.write('\r\x1b[2K');
+        console.log(formatted);
+      }
       spinner.startSession(event.step.slice(0, 50));
-      rl.prompt(true); // restore › so user can keep typing
+      rl.prompt(true);
       break;
     }
     case 'session.token': {
       spinner.stop();
       if (!streaming) {
-        // Clear › prompt line before streaming response
-        process.stdout.write('\r\x1b[2K\n  ');
+        process.stdout.write('\r\x1b[2K\n');
         streaming = true;
+        streamLineCount = 1;
       }
       process.stdout.write(event.token);
       lineBuffer += event.token;
+      streamLineCount += (event.token.match(/\n/g) || []).length;
       break;
     }
     case 'runtime.heal_proposal': {
@@ -353,10 +472,29 @@ function handleWsEvent(event) {
     }
     case 'session.completed': {
       spinner.stop();
-      if (streaming) { process.stdout.write('\n'); streaming = false; }
-      const r = event.result ?? {};
-      if (r.files_written?.length) console.log(`\n  ${fmt(C.green, '✓')} ${r.files_written.join(', ')}`);
-      if (r.tokens_used) process.stdout.write(fmt(C.dim, `\n  ${r.tokens_used} tokens · ${r.model ?? ''}\n`));
+
+      // Re-render streamed response with markdown (rewind cursor, clear, reprint)
+      if (streaming) {
+        const rendered = renderMarkdown(lineBuffer.trim());
+        const rewound  = streamLineCount + 1;
+        process.stdout.write(`\x1b[${rewound}A\x1b[0J`); // move up + clear to end
+        process.stdout.write(rendered + '\n');
+        streaming = false;
+        streamLineCount = 0;
+      }
+
+      const r       = event.result ?? {};
+      const elapsed = sessionStartMs ? `${((Date.now() - sessionStartMs) / 1000).toFixed(1)}s` : '';
+      const cost    = estimateCost(r.model, r.tokens_used);
+
+      if (r.files_written?.length)
+        console.log(`\n  ${fmt(C.green, '✓')} ${r.files_written.join(', ')}`);
+
+      // Stats line: tokens · model · elapsed · cost
+      if (r.tokens_used) {
+        process.stdout.write(fmt(C.dim,
+          `\n  ${r.tokens_used.toLocaleString()} tokens · ${r.model ?? ''}${elapsed ? ` · ${elapsed}` : ''}${cost}\n`));
+      }
 
       // Contextual next-step suggestions
       const suggestions = _suggestNext(lineBuffer, r);
@@ -366,18 +504,22 @@ function handleWsEvent(event) {
         );
       }
 
-      // Confirm server if port mentioned
+      // OS notification for tasks that took > 8s (user may have switched windows)
+      if (sessionStartMs && Date.now() - sessionStartMs > 8000) {
+        notifyDone(currentTask, true);
+      }
+
       confirmServer(r, lineBuffer);
       lineBuffer = '';
       if (pendingResolve) { pendingResolve(); pendingResolve = null; }
       sessionId = null;
-      // auto-drain queued messages
       drainQueue();
       break;
     }
     case 'session.failed': {
       spinner.stop();
-      if (streaming) { process.stdout.write('\n'); streaming = false; }
+      if (streaming) { process.stdout.write('\n'); streaming = false; streamLineCount = 0; }
+      if (sessionStartMs && Date.now() - sessionStartMs > 8000) notifyDone(currentTask, false);
       const isAbort = /aborted|timeout|AbortError/i.test(event.error ?? '');
       console.log(`\n  ${fmt(C.red, '✗')} ${event.error}\n`);
       // Offer retry if it was a timeout/abort
@@ -478,7 +620,9 @@ async function runTask(input) {
       body: JSON.stringify(body),
     });
     const s = await res.json();
-    sessionId = s.session_id ?? s.id;
+    sessionId      = s.session_id ?? s.id;
+    sessionStartMs = Date.now();
+    currentTask    = task;
     // Start session-mode status (no \r animation) then restore › so user can type
     process.stdout.write('\n');
     spinner.startSession('Thinking');
@@ -513,8 +657,11 @@ async function runTask(input) {
         const steps = session.steps ?? [];
         for (let j = lastPolledStep; j < steps.length; j++) {
           spinner.stop();
-          process.stdout.write('\r\x1b[2K');
-          console.log(`  \x1b[2m›\x1b[0m ${steps[j].description}`);
+          const formatted = formatStep(steps[j].description);
+          if (formatted !== null) {
+            process.stdout.write('\r\x1b[2K');
+            console.log(formatted);
+          }
           spinner.startSession(steps[j].description.slice(0, 50));
           rl.prompt(true);
         }
