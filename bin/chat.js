@@ -175,6 +175,89 @@ function renderMarkdown(text) {
   return out.join('\n');
 }
 
+// ─── Human-readable active task summary ───────────────────────────────────────
+// Translates raw AgentExecutor step labels into a plain-English 1-liner shown
+// as the live "what is happening right now" status line.
+function stepToHuman(step) {
+  // Tool invocations: "▶ tool_name(args...)"
+  const toolMatch = step.match(/^▶\s+(\w+)\((.{0,200})\)/);
+  if (toolMatch) {
+    const [, tool, args] = toolMatch;
+    // gui_automation — decode action
+    if (tool === 'gui_automation') {
+      const act  = (args.match(/action[=:]\s*["']?(\w+)["']?/i) || [])[1] ?? '';
+      const txt  = (args.match(/text[=:]\s*["']([^"']{0,40})["']/i) || [])[1] ?? '';
+      const url  = (args.match(/url[=:]\s*["']([^"']{0,60})["']/i) || [])[1] ?? '';
+      const secs = (args.match(/seconds[=:]\s*([\d.]+)/i) || [])[1] ?? '';
+      const x    = (args.match(/\bx[=:]\s*(\d+)/i) || [])[1] ?? '';
+      const y    = (args.match(/\by[=:]\s*(\d+)/i) || [])[1] ?? '';
+      const map = {
+        screenshot:    'Taking screenshot of screen',
+        click:         x ? `Clicking at (${x}, ${y})` : 'Clicking',
+        double_click:  x ? `Double-clicking at (${x}, ${y})` : 'Double-clicking',
+        right_click:   'Right-clicking',
+        move:          x ? `Moving cursor to (${x}, ${y})` : 'Moving cursor',
+        type:          txt ? `Typing: "${txt.slice(0,30)}"` : 'Typing text',
+        hotkey:        txt ? `Pressing ${txt}` : 'Pressing hotkey',
+        scroll:        'Scrolling',
+        drag:          'Dragging',
+        find_and_click: txt ? `Clicking "${txt}"` : 'Finding and clicking',
+        open_url:      url ? `Opening ${url}` : 'Opening URL in browser',
+        open_app:      txt ? `Opening ${txt}` : 'Opening app',
+        get_screen_size: 'Getting screen size',
+        get_cursor_pos:  'Getting cursor position',
+        wait:          secs ? `Waiting ${secs}s for UI to load` : 'Waiting for UI',
+      };
+      return map[act] ?? `GUI: ${act}`;
+    }
+    // shell_exec
+    if (tool === 'shell_exec') {
+      const cmd = args.replace(/^["']|["']$/g, '').replace(/\\n/g, ' ').trim().slice(0, 60);
+      return `Running: ${cmd}`;
+    }
+    // web_search
+    if (tool === 'web_search') {
+      const q = (args.match(/["']([^"']{1,60})["']/) || [])[1] ?? args.slice(0,50);
+      return `Searching: ${q}`;
+    }
+    // file_op
+    if (tool === 'file_op') {
+      const op   = (args.match(/op[=:]\s*["']?(\w+)["']?/i) || [])[1] ?? '';
+      const path = (args.match(/path[=:]\s*["']([^"']{1,50})["']/i) || [])[1] ?? '';
+      const opMap = { write: 'Writing', read: 'Reading', list: 'Listing', mkdir: 'Creating folder', delete: 'Deleting' };
+      return `${opMap[op] ?? op}: ${path}`;
+    }
+    // browser_open / scrape_url
+    if (tool === 'browser_open' || tool === 'scrape_url') {
+      const url = (args.match(/["']([^"']{1,60})["']/) || [])[1] ?? args.slice(0,50);
+      return `Reading page: ${url}`;
+    }
+    // memory_write
+    if (tool === 'memory_write') {
+      const label = (args.match(/label[=:]\s*["']([^"']{1,40})["']/i) || [])[1] ?? '';
+      return `Saving to memory: ${label}`;
+    }
+    // generic fallback
+    const cleanArgs = args.replace(/^["'](.*)["']$/, '$1').replace(/\\n/g, ' ').slice(0, 50);
+    return `${tool}: ${cleanArgs}`;
+  }
+
+  // Result line: "  ↳ text" — show briefly as status, not in history
+  if (/^\s*↳/.test(step)) {
+    return step.replace(/^\s*↳\s*/, '').slice(0, 80);
+  }
+
+  // Thinking / Continuing
+  if (/^Thinking/.test(step)) return 'Thinking…';
+  if (/^Continuing/.test(step)) return 'Working on it…';
+
+  // Self-heal, skill, misc
+  if (/^↺/.test(step)) return step.slice(0, 80);
+  if (/^✓/.test(step)) return step.slice(0, 80);
+
+  return step.slice(0, 80);
+}
+
 // ─── Step formatter ───────────────────────────────────────────────────────────
 // Converts raw step labels from AgentExecutor into icon + clean readable form.
 function formatStep(step) {
@@ -370,12 +453,29 @@ function handleWsEvent(event) {
     case 'session.step': {
       spinner.stop();
       if (streaming) { process.stdout.write('\n'); streaming = false; streamLineCount = 0; }
-      const formatted = formatStep(event.step);
-      if (formatted !== null) {
-        process.stdout.write('\r\x1b[2K');
-        console.log(formatted);
+
+      const step = event.step;
+      const isToolCall   = /^▶\s+\w+\(/.test(step);          // ▶ tool(args)
+      const isResult     = /^\s*↳/.test(step);                // ↳ result
+      const isThinking   = /^(Thinking|Continuing)/.test(step);
+      const isSummary    = /^(Done|Files|Commands|Matched|Fetching|Loaded|Selected|Extracting|Querying|↺|✓)/.test(step);
+
+      // Print tool invocations and summary milestones to scrolling history
+      if (isToolCall || isSummary) {
+        const formatted = formatStep(step);
+        if (formatted !== null) {
+          process.stdout.write('\r\x1b[2K');
+          console.log(formatted);
+        }
       }
-      spinner.startSession(event.step.slice(0, 50));
+
+      // Always update the live 1-liner status (overwrites current line)
+      const human = stepToHuman(step);
+      if (human) {
+        const icon = isThinking ? fmt(C.dim, '⠋') : isResult ? fmt(C.dim, '↳') : fmt(C.cyan, '⚡');
+        process.stdout.write(`\r\x1b[2K  ${icon} ${fmt(C.dim, human)}`);
+      }
+
       rl.prompt(true);
       break;
     }
