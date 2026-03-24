@@ -8,9 +8,31 @@ import { FileCapability } from './FileCapability.js';
 export class CapabilityRegistry {
   private capabilities = new Map<string, Capability>();
 
-  constructor() {
+  /**
+   * Constructor optionally accepts a CodespaceManager.
+   * If provided and the gh CLI is available, uses CodespaceBrowserCapability
+   * for browser_open — cloud Linux browser via SSH tunnel.
+   *
+   * SECURITY: The registry is only instantiated inside AgentExecutor,
+   * which is only created for AUTHORISED subagents (trust_level: 1,
+   * task_type: browser_task). The main agent does NOT have direct access
+   * to browser_open without going through a subagent spawn.
+   */
+  constructor(codespaceManager?: unknown) {
     this.register(new WebSearchCapability());
-    this.register(new BrowserCapability());
+
+    // Browser capability: use Codespace if available, otherwise local Chrome
+    if (codespaceManager) {
+      try {
+        const { CodespaceBrowserCapability } = require('./CodespaceBrowserCapability.js');
+        this.register(new CodespaceBrowserCapability(codespaceManager));
+      } catch {
+        this.register(new BrowserCapability());
+      }
+    } else {
+      this.register(new BrowserCapability());
+    }
+
     this.register(new ScraperCapability());
     this.register(new ShellCapability());
     this.register(new FileCapability());

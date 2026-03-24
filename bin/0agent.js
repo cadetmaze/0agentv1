@@ -126,6 +126,10 @@ switch (cmd) {
     await runMemoryCommand(args.slice(1));
     break;
 
+  case 'codespace':
+    await runCodespaceCommand(args.slice(1));
+    break;
+
   default:
     showHelp();
     break;
@@ -1093,6 +1097,58 @@ async function daemonMemorySync(direction) {
     if (!res.ok) return null;
     return await res.json();
   } catch { return null; }
+}
+
+// ─── Codespace commands ───────────────────────────────────────────────────────
+
+async function runCodespaceCommand(csArgs) {
+  const sub = csArgs[0] ?? 'status';
+
+  switch (sub) {
+    case 'setup': {
+      console.log('\n  Setting up GitHub Codespace browser backend...\n');
+      const result = await fetch(`${BASE_URL}/api/codespace/setup`, { method: 'POST' }).catch(() => null);
+      const data = result?.ok ? await result.json().catch(() => null) : null;
+      if (data?.started) {
+        console.log(`  \x1b[32m✓\x1b[0m Codespace provisioning started`);
+        console.log(`  \x1b[2mFirst time: ~2-3 min. Check with: 0agent codespace status\x1b[0m\n`);
+      } else {
+        console.log(`  \x1b[33m⚠\x1b[0m ${data?.error ?? 'Configure GitHub memory first: 0agent memory connect github'}\n`);
+      }
+      break;
+    }
+    case 'status': {
+      const result = await fetch(`${BASE_URL}/api/codespace/status`).catch(() => null);
+      const data = result?.ok ? await result.json().catch(() => null) : null;
+      if (data) {
+        const state = data.state ?? 'unknown';
+        const icon = state === 'Available' ? '\x1b[32m✓\x1b[0m' : state === 'Shutdown' ? '\x1b[33m●\x1b[0m' : '\x1b[2m○\x1b[0m';
+        console.log(`\n  Browser backend: ${icon} ${state}`);
+        if (data.ready) console.log(`  Tunnel:          \x1b[32m✓ open\x1b[0m → http://localhost:3001`);
+        if (data.name) console.log(`  Codespace:       ${data.name}`);
+        console.log(`  Cost:            ~60 hours/month free on GitHub personal\n`);
+      } else {
+        console.log('\n  Codespace not configured. Run: 0agent codespace setup\n');
+      }
+      break;
+    }
+    case 'start': {
+      process.stdout.write('  Starting codespace...');
+      const result = await fetch(`${BASE_URL}/api/codespace/start`, { method: 'POST' }).catch(() => null);
+      const data = result?.ok ? await result.json().catch(() => null) : null;
+      console.log(data?.ok ? ' \x1b[32m✓\x1b[0m' : ` \x1b[31m✗\x1b[0m ${data?.error ?? 'failed'}`);
+      break;
+    }
+    case 'stop': {
+      process.stdout.write('  Stopping codespace (preserves state)...');
+      const result = await fetch(`${BASE_URL}/api/codespace/stop`, { method: 'POST' }).catch(() => null);
+      const data = result?.ok ? await result.json().catch(() => null) : null;
+      console.log(data?.ok ? ' \x1b[32m✓\x1b[0m Stopped. Hours saved.' : ` \x1b[31m✗\x1b[0m`);
+      break;
+    }
+    default:
+      console.log('  Usage: 0agent codespace setup | status | start | stop');
+  }
 }
 
 // ─── Result preview — confirms the agent's work actually ran ────────────────

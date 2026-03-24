@@ -42,6 +42,7 @@ import { ProjectScanner } from './ProjectScanner.js';
 import { TeamManager } from './TeamManager.js';
 import { TeamSync } from './TeamSync.js';
 import { GitHubMemorySync } from './GitHubMemorySync.js';
+import { CodespaceManager } from './CodespaceManager.js';
 import type { DaemonStatus } from './routes/health.js';
 
 // ─── Types ───────────────────────────────────────────
@@ -66,6 +67,7 @@ export class ZeroAgentDaemon {
   private githubMemorySync: GitHubMemorySync | null = null;
   private memorySyncTimer: ReturnType<typeof setInterval> | null = null;
   private proactiveSurfaceInstance: unknown = null;
+  private codespaceManager: CodespaceManager | null = null;
   private startedAt: number = 0;
   private pidFilePath: string;
 
@@ -125,6 +127,18 @@ export class ZeroAgentDaemon {
         this.graph,
       );
       console.log(`[0agent] Memory sync: github.com/${ghMemCfg.owner}/${ghMemCfg.repo}`);
+
+      // Codespace manager uses the same memory repo as its template
+      // Only init if gh CLI is authenticated
+      if (CodespaceManager.isAvailable()) {
+        const memRepo = `${ghMemCfg.owner}/${ghMemCfg.repo}`;
+        this.codespaceManager = new CodespaceManager(memRepo);
+        // Pre-warm in background — by the time user needs browser, it may be ready
+        this.codespaceManager.getReadyUrl().catch(() => {
+          // Non-fatal — codespace warmup is best-effort at startup
+        });
+        console.log(`[0agent] Browser backend: github.com codespace (from ${memRepo})`);
+      }
       // Pull in background — don't block startup
       this.githubMemorySync.pull().then(r => {
         if (r.pulled) console.log(`[0agent] Memory pulled: +${r.nodes_synced} nodes, +${r.edges_synced} edges`);
@@ -222,6 +236,17 @@ export class ZeroAgentDaemon {
       getStatus: () => this.getStatus(),
       getMemorySync: () => memSyncRef,
       proactiveSurface: proactiveSurface as any,
+      getCodespaceManager: () => this.codespaceManager,
+      setupCodespace: async () => {
+        if (!this.codespaceManager) return { started: false, error: 'GitHub memory not configured. Run: 0agent memory connect github' };
+        try {
+          // Provision in background — returns immediately
+          this.codespaceManager.getReadyUrl().catch(console.error);
+          return { started: true };
+        } catch (err) {
+          return { started: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
     });
     await this.httpServer.start();
 
@@ -266,6 +291,8 @@ export class ZeroAgentDaemon {
     }
     if (this.memorySyncTimer) { clearInterval(this.memorySyncTimer); this.memorySyncTimer = null; }
     this.githubMemorySync = null;
+    this.codespaceManager?.closeTunnel();
+    this.codespaceManager = null;
 
     this.sessionManager = null;
     this.skillRegistry = null;

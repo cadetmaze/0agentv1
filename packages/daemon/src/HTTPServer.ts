@@ -34,6 +34,8 @@ import { skillRoutes } from './routes/skills.js';
 import { insightsRoutes } from './routes/insights.js';
 import { memoryRoutes } from './routes/memory.js';
 import { llmRoutes } from './routes/llm.js';
+import { codespaceRoutes } from './routes/codespace.js';
+import type { CodespaceManager } from './CodespaceManager.js';
 import type { SessionManager } from './SessionManager.js';
 import type { SkillRegistry } from './SkillRegistry.js';
 import type { GitHubMemorySync } from './GitHubMemorySync.js';
@@ -49,6 +51,8 @@ export interface HTTPServerDeps {
   getStatus: () => DaemonStatus;
   getMemorySync?: () => GitHubMemorySync | null;
   proactiveSurface?: ProactiveSurface | null;
+  getCodespaceManager?: () => CodespaceManager | null;
+  setupCodespace?: () => Promise<{ started: boolean; error?: string }>;
 }
 
 export class HTTPServer {
@@ -71,6 +75,10 @@ export class HTTPServer {
     this.app.route('/api/insights', insightsRoutes({ proactiveSurface: deps.proactiveSurface ?? null }));
     this.app.route('/api/memory',   memoryRoutes({ getSync: deps.getMemorySync ?? (() => null) }));
     this.app.route('/api/llm',      llmRoutes());
+    this.app.route('/api/codespace', codespaceRoutes({
+      getManager: deps.getCodespaceManager ?? (() => null),
+      setup: deps.setupCodespace ?? (async () => ({ started: false, error: 'Not configured' })),
+    }));
 
     // Serve 3D knowledge graph at root and /graph
     const serveGraph = (c: any) => {

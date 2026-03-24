@@ -1,0 +1,12 @@
+{
+  "name": "0agent-browser-server",
+  "version": "1.0.0",
+  "description": "Browser server for 0agent — runs inside GitHub Codespace",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "playwright": "^1.42.0"
+  }
+}

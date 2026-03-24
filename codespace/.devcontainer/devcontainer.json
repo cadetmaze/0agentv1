@@ -1,0 +1,17 @@
+{
+  "name": "0agent Browser Sandbox",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22",
+  "postCreateCommand": "cd /workspaces && npm install && npx playwright install chromium --with-deps && pip3 install scrapling --quiet",
+  "postStartCommand": "cd /workspaces && pkill -f 'node server.js' 2>/dev/null; nohup node server.js > /tmp/browser-server.log 2>&1 &",
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "0agent Browser",
+      "onAutoForward": "silent",
+      "visibility": "private"
+    }
+  },
+  "remoteEnv": {
+    "NODE_ENV": "production"
+  }
+}

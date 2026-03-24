@@ -199,6 +199,10 @@ export class GitHubMemorySync {
       const readme = this.generateReadme(nodes.length, edges.length);
       pushes.push(putFile(token, owner, repo, 'README.md', readme, commitMsg));
 
+      // Push codespace files — makes the memory repo a valid codespace template
+      // so `gh codespace create --repo owner/0agent-memory` gives a browser sandbox
+      await this.ensureCodespaceFiles(token, owner, repo, commitMsg);
+
       await Promise.all(pushes);
 
       this.lastPushAt = now;
@@ -387,6 +391,41 @@ export class GitHubMemorySync {
         }
       }
     } catch {}
+  }
+
+  /**
+   * Push the codespace browser server files to the memory repo.
+   * This makes the memory repo a valid Codespace template — one repo for everything.
+   * Only pushes if the files don't exist yet (idempotent).
+   */
+  private async ensureCodespaceFiles(token: string, owner: string, repo: string, msg: string): Promise<void> {
+    // Check if devcontainer already exists
+    const existing = await getFileSha(token, owner, repo, '.devcontainer/devcontainer.json');
+    if (existing) return; // already set up, don't overwrite
+
+    const devcontainer = JSON.stringify({
+      name: '0agent Browser Sandbox',
+      image: 'mcr.microsoft.com/devcontainers/javascript-node:22',
+      postCreateCommand: 'cd /workspaces && npm install && npx playwright install chromium --with-deps && pip3 install scrapling --quiet 2>/dev/null || true',
+      postStartCommand: 'cd /workspaces && pkill -f "node server.js" 2>/dev/null; nohup node server.js > /tmp/browser-server.log 2>&1 &',
+      forwardPorts: [3000],
+      portsAttributes: {
+        '3000': { label: '0agent Browser', onAutoForward: 'silent', visibility: 'private' },
+      },
+    }, null, 2);
+
+    const packageJson = JSON.stringify({
+      name: '0agent-browser-server', version: '1.0.0',
+      dependencies: { playwright: '^1.42.0' },
+    }, null, 2);
+
+    // Push in parallel
+    await Promise.all([
+      putFile(token, owner, repo, '.devcontainer/devcontainer.json', devcontainer, msg),
+      putFile(token, owner, repo, 'package.json', packageJson, msg),
+      // Note: server.js is too large to inline here — users pull it from the npm package at codespace start
+      putFile(token, owner, repo, '.gitignore', 'node_modules/\n*.log\n', msg),
+    ]);
   }
 
   private generateReadme(nodeCount: number, edgeCount: number): string {
