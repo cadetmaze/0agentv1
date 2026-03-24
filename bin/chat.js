@@ -166,7 +166,7 @@ async function connectWS() {
       ws.send(JSON.stringify({ type: 'subscribe', topics: ['sessions', 'graph', 'insights'] }));
     });
     ws.on('message', data => handleWsEvent(JSON.parse(data.toString())));
-    ws.on('close', () => { wsReady = false; setTimeout(connectWS, 2000); });
+    ws.on('close', () => { wsReady = false; setTimeout(connectWS, 800); }); // faster reconnect
     ws.on('error', () => { wsReady = false; });
   } catch {}
 }
@@ -349,6 +349,50 @@ async function runTask(input) {
     const s = await res.json();
     sessionId = s.session_id ?? s.id;
     spinner.start('Thinking');  // show immediately after session created
+
+    // Polling fallback — runs concurrently with WS events.
+    // Catches completion when WS is disconnected (e.g. daemon just restarted).
+    let lastPolledStep = 0;
+    const sid = sessionId;
+    const pollTimer = setInterval(async () => {
+      if (!pendingResolve || sessionId !== sid) { clearInterval(pollTimer); return; }
+      try {
+        const r = await fetch(`${BASE_URL}/api/sessions/${sid}`, { signal: AbortSignal.timeout(2000) });
+        const session = await r.json();
+
+        // Show any new steps not yet shown via WS
+        const steps = session.steps ?? [];
+        for (let j = lastPolledStep; j < steps.length; j++) {
+          spinner.stop();
+          console.log(`  \x1b[2m›\x1b[0m ${steps[j].description}`);
+          spinner.start(steps[j].description.slice(0, 50));
+        }
+        lastPolledStep = steps.length;
+
+        if (session.status === 'completed' || session.status === 'failed') {
+          clearInterval(pollTimer);
+          if (!pendingResolve) return; // WS already handled it
+          spinner.stop();
+          if (session.status === 'completed') {
+            const out = session.result?.output;
+            if (out && typeof out === 'string') {
+              console.log(`\n  ${out}`);
+            }
+            if (session.result?.files_written?.length) console.log(`  \x1b[32m✓\x1b[0m Files: ${session.result.files_written.join(', ')}`);
+            if (session.result?.tokens_used) console.log(`  \x1b[2m${session.result.tokens_used} tokens\x1b[0m`);
+            console.log(`\n  \x1b[32m✓ Done\x1b[0m\n`);
+          } else {
+            console.log(`\n  \x1b[31m✗ Failed:\x1b[0m ${session.error}\n`);
+          }
+          const resolve_ = pendingResolve;
+          pendingResolve = null;
+          sessionId = null;
+          resolve_();
+          rl.prompt();
+        }
+      } catch {}
+    }, 1500);
+
     return new Promise(resolve => { pendingResolve = resolve; });
   } catch (e) {
     console.log(`  ${fmt(C.red, '✗')} ${e.message}`);
@@ -727,9 +771,10 @@ rl.on('line', async (input) => {
     rl.prompt();
   } else {
     await runTask(line);
-    // prompt() is called from WS handler after session.completed
-    // but fall back if WS not connected
-    if (!wsReady) rl.prompt();
+    // runTask resolves when session completes (via WS or polling fallback)
+    // rl.prompt() may already have been called by the handler that resolved it,
+    // but calling it again is a safe no-op if readline is already prompting
+    if (!streaming) rl.prompt();
   }
 });
 
