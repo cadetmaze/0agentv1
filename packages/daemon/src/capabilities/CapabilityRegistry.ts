@@ -20,7 +20,7 @@ export class CapabilityRegistry {
    * task_type: browser_task). The main agent does NOT have direct access
    * to browser_open without going through a subagent spawn.
    */
-  constructor(codespaceManager?: unknown, graph?: KnowledgeGraph) {
+  constructor(codespaceManager?: unknown, graph?: KnowledgeGraph, onMemoryWrite?: () => void) {
     this.register(new WebSearchCapability());
 
     // Browser capability: use Codespace if available, otherwise local Chrome
@@ -41,7 +41,7 @@ export class CapabilityRegistry {
 
     // Memory capability — only available when graph is connected
     if (graph) {
-      this.register(new MemoryCapability(graph));
+      this.register(new MemoryCapability(graph, onMemoryWrite));
     }
   }
 

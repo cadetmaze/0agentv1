@@ -34,8 +34,9 @@ export interface AgentExecutorConfig {
   cwd: string;
   max_iterations?: number;
   max_command_ms?: number;
-  agent_root?: string;     // path to 0agent source — injected for self-improvement tasks
-  graph?: KnowledgeGraph;  // knowledge graph — enables memory_write tool
+  agent_root?: string;         // path to 0agent source — injected for self-improvement tasks
+  graph?: KnowledgeGraph;      // knowledge graph — enables memory_write tool
+  onMemoryWrite?: () => void;  // called when memory_write tool fires → triggers GitHub push
 }
 
 // Self-modification trigger words — when detected, inject agent source path and extend timeout
@@ -58,7 +59,7 @@ export class AgentExecutor {
     this.maxIterations = config.max_iterations ?? 20;
     this.maxCommandMs = config.max_command_ms ?? 30_000;
     this.agentRoot = config.agent_root;
-    this.registry = new CapabilityRegistry(undefined, config.graph);
+    this.registry = new CapabilityRegistry(undefined, config.graph, config.onMemoryWrite);
   }
 
   async execute(task: string, systemContext?: string): Promise<AgentResult> {

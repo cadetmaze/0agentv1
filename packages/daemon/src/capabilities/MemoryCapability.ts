@@ -26,7 +26,7 @@ export class MemoryCapability implements Capability {
     },
   };
 
-  constructor(private graph: KnowledgeGraph) {}
+  constructor(private graph: KnowledgeGraph, private onWrite?: () => void) {}
 
   async execute(input: Record<string, unknown>, _cwd: string): Promise<CapabilityResult> {
     const label   = String(input.label   ?? '').trim();
@@ -59,11 +59,14 @@ export class MemoryCapability implements Capability {
         this.graph.addNode(node);
       }
 
-      return {
+      const result = {
         success: true,
         output: `Remembered: "${label}" = ${content.slice(0, 120)}${content.length > 120 ? '…' : ''}`,
         duration_ms: Date.now() - start,
       };
+      // Notify caller so GitHub sync can be triggered immediately
+      this.onWrite?.();
+      return result;
     } catch (err) {
       return {
         success: false,

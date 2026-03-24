@@ -344,7 +344,7 @@ export class SessionManager {
       if (activeLLM?.isConfigured) {
         const executor = new AgentExecutor(
           activeLLM,
-          { cwd: this.cwd, agent_root: this.agentRoot, graph: this.graph },
+          { cwd: this.cwd, agent_root: this.agentRoot, graph: this.graph, onMemoryWrite: this.onMemoryWritten },
           // step callback → emit session.step events
           (step) => this.addStep(sessionId, step),
           // token callback → emit session.token events
@@ -535,37 +535,55 @@ export class SessionManager {
   private async _extractAndPersistFacts(task: string, output: string, llm: LLMExecutor): Promise<void> {
     if (!this.graph || !llm.isConfigured) return;
 
+    // Skip trivial / command-only tasks that won't have learnable facts
+    const combined = `${task} ${output}`;
+    if (combined.trim().length < 20) return;
+
     const prompt = `Extract factual entities from this conversation that should be remembered long-term.
-Return ONLY a JSON array, no other text, max 12 items.
+Return ONLY a valid JSON array (no markdown, no explanation), max 12 items.
+If nothing worth remembering, return [].
 
 Types: identity (name/role), project (apps/products), tech (stack/tools), preference, url, path, config, outcome
 
-Format: [{"label":"snake_case_key","content":"value to remember","type":"type"}]
+Format: [{"label":"snake_case_key","content":"value","type":"type"}]
 
 Examples:
-- User says "my name is Sahil" → {"label":"user_name","content":"Sahil","type":"identity"}
-- User says "we have a telegram bot" → {"label":"project_telegram_bot","content":"user has a Telegram bot project","type":"project"}
-- User says "I use React and Next.js" → {"label":"tech_stack","content":"React, Next.js","type":"tech"}
+- "my name is Sahil" → {"label":"user_name","content":"Sahil","type":"identity"}
+- "we have a telegram bot" → {"label":"project_telegram_bot","content":"user has a Telegram bot","type":"project"}
+- "I use React and Next.js" → {"label":"tech_stack","content":"React, Next.js","type":"tech"}
+- ngrok URL found → {"label":"ngrok_url","content":"https://abc.ngrok.io","type":"url"}
 
 Conversation:
 User: ${task.slice(0, 600)}
-Agent: ${output.slice(0, 400)}`;
+Agent: ${output.slice(0, 500)}`;
 
     try {
       const resp = await llm.complete(
         [{ role: 'user', content: prompt }],
-        'You are a concise memory extraction system. Extract only factual, durable information. Skip generic statements.'
+        'You are a memory extraction system. Be concise. Extract only factual, durable information. Return valid JSON only.'
       );
 
-      const jsonMatch = resp.content.match(/\[[\s\S]*?\]/);
-      if (!jsonMatch) return;
+      // Parse robustly — find the JSON array anywhere in the response
+      let entities: Array<{ label: string; content: string; type: string }> = [];
+      const raw = resp.content.trim();
 
-      const entities = JSON.parse(jsonMatch[0]) as Array<{ label: string; content: string; type: string }>;
+      // Try direct parse first
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) entities = parsed;
+      } catch {
+        // Try extracting array from the response
+        const match = raw.match(/\[\s*\{[\s\S]*?\}\s*\]/);
+        if (match) {
+          try { entities = JSON.parse(match[0]); } catch {}
+        }
+      }
+
       if (!Array.isArray(entities) || entities.length === 0) return;
 
       let wrote = 0;
       for (const e of entities.slice(0, 12)) {
-        if (!e.label?.trim() || !e.content?.trim()) continue;
+        if (!e?.label?.trim() || !e?.content?.trim()) continue;
         const nodeId = `memory:${e.label.toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
         try {
           const existing = this.graph.getNode(nodeId);
@@ -584,15 +602,18 @@ Agent: ${output.slice(0, 400)}`;
             }));
           }
           wrote++;
-        } catch {}
+        } catch (err) {
+          console.warn(`[0agent] Memory write failed for "${e.label}":`, err instanceof Error ? err.message : err);
+        }
       }
 
       if (wrote > 0) {
-        console.log(`[0agent] Memory: extracted ${wrote} facts from session`);
+        console.log(`[0agent] Memory: persisted ${wrote} facts → graph`);
         this.onMemoryWritten?.();
       }
-    } catch {
-      // Non-fatal — entity extraction never blocks session completion
+    } catch (err) {
+      // Non-fatal — log for debugging
+      console.warn('[0agent] Memory extraction failed:', err instanceof Error ? err.message : String(err));
     }
   }
 

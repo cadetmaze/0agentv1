@@ -205,8 +205,16 @@ export class ZeroAgentDaemon {
       projectContext: projectContext ?? undefined,
       adapter: this.adapter,
       agentRoot,   // agent source path — self-improvement tasks read the right files
-      // Mark GitHub memory dirty immediately when facts are extracted — pushes within 2min
-      onMemoryWritten: () => { this.githubMemorySync?.markDirty(); },
+      // Push to GitHub immediately when facts are extracted from a session
+      onMemoryWritten: () => {
+        this.githubMemorySync?.markDirty();
+        // Also push immediately (don't wait for 2-min timer)
+        if (this.githubMemorySync) {
+          this.githubMemorySync.push('sync: new facts learned').then(r => {
+            if (r.pushed) console.log(`[0agent] Memory pushed: ${r.nodes_synced} nodes → github`);
+          }).catch(() => {});
+        }
+      },
     });
 
     // 6.5 — Collab-3: team sync worker (only if member of teams)
@@ -214,17 +222,15 @@ export class ZeroAgentDaemon {
       ? new TeamSync(teamManager, this.adapter, identity.entity_node_id)
       : null;
 
-    // 6.5.5 — GitHub memory: auto-push every 30 minutes if dirty
+    // 6.5.5 — GitHub memory: push every 2 minutes (unconditional — always sync latest state)
     if (this.githubMemorySync) {
       const memSync = this.githubMemorySync;
       this.memorySyncTimer = setInterval(async () => {
-        if (memSync.hasPendingChanges()) {
-          const result = await memSync.push().catch(() => null);
-          if (result?.pushed) {
-            console.log(`[0agent] Memory auto-synced: ${result.nodes_synced} nodes`);
-          }
+        const result = await memSync.push().catch(() => null);
+        if (result?.pushed && result.nodes_synced > 0) {
+          console.log(`[0agent] Memory synced: ${result.nodes_synced} nodes → github`);
         }
-      }, 2 * 60 * 1000); // 2 minutes — push whenever dirty
+      }, 2 * 60 * 1000); // 2 minutes
       if (typeof this.memorySyncTimer === 'object') (this.memorySyncTimer as any).unref?.();
     }
 
