@@ -1181,9 +1181,11 @@ emitKeypressEvents(process.stdin, rl);
 process.stdin.on('keypress', (_char, key) => {
   if (!key || _paletteOpen) return;
   if (key.name === 'escape' && pendingResolve) {
-    // Cancel the running session cleanly
-    process.stdout.write(`\r\x1b[2K\n  ${fmt(C.yellow, '↩')} Cancelled\n`);
     spinner.stop();
+    process.stdout.write(`\r\x1b[2K`);
+    process.stdout.write(`\n  ${fmt(C.yellow, '⏹')}  ${fmt(C.bold, 'Task stopped.')} All background processes killed.\n`);
+    process.stdout.write(`  ${fmt(C.dim, 'Send a new message to start fresh.')}\n\n`);
+
     if (sessionId) {
       fetch(`${BASE_URL}/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
     }
@@ -1195,7 +1197,6 @@ process.stdin.on('keypress', (_char, key) => {
     messageQueue.length = 0;
 
     // Kill any OS-level processes spawned by GUI/shell capabilities
-    // (python3 GUI scripts, bash subprocesses) so nothing keeps running
     import('node:child_process').then(({ execSync: _exec }) => {
       try { _exec('pkill -f "0agent_gui_" 2>/dev/null; pkill -f "0agent-bg-" 2>/dev/null; true', { stdio: 'ignore' }); } catch {}
     }).catch(() => {});
