@@ -89,6 +89,18 @@ export const AGENT_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'web_search',
+    description: 'Search the web and return titles, URLs, and snippets. No API key needed. Use this first to find relevant pages, then scrape_url for full content.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query:       { type: 'string', description: 'Search query' },
+        num_results: { type: 'number', description: 'Number of results (default 5, max 10)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'scrape_url',
     description: 'Scrape a URL and return clean structured content. Handles JavaScript-rendered pages, auto-adapts to page structure, returns text/links/metadata. Better than shell curl for web pages.',
     input_schema: {

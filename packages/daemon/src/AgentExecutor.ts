@@ -158,6 +158,11 @@ export class AgentExecutor {
         return this.readFile(String(input.path ?? ''));
       case 'list_dir':
         return this.listDir(input.path ? String(input.path) : undefined);
+      case 'web_search':
+        return this.webSearch(
+          String(input.query ?? ''),
+          Math.min(10, Number(input.num_results ?? 5)),
+        );
       case 'scrape_url':
         return this.scrapeUrl(
           String(input.url ?? ''),
@@ -211,6 +216,60 @@ export class AgentExecutor {
     return content.length > 8000
       ? content.slice(0, 8000) + `\n…[truncated, ${content.length} total bytes]`
       : content;
+  }
+
+  private async webSearch(query: string, numResults: number): Promise<string> {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&kl=us-en`;
+    let html = '';
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(12_000),
+      });
+      html = await res.text();
+    } catch (err) {
+      return `Search request failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    // Parse DDG HTML results — titles + redirect URLs + snippets
+    const results: Array<{ title: string; url: string; snippet: string }> = [];
+
+    // Title links: <a class="result__a" href="...">Title</a>
+    const titleRe = /<a[^>]+class="result__a"[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
+    const snippetRe = /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+
+    const titles: Array<{ url: string; title: string }> = [];
+    const snippets: string[] = [];
+
+    let m: RegExpExecArray | null;
+    while ((m = titleRe.exec(html)) !== null) {
+      let href = m[1];
+      const title = m[2].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+      // Decode DDG redirect: /l/?uddg=ENCODED_URL
+      const uddg = href.match(/[?&]uddg=([^&]+)/);
+      if (uddg) href = decodeURIComponent(uddg[1]);
+      if (href.startsWith('http') && title && titles.length < numResults) {
+        titles.push({ url: href, title });
+      }
+    }
+
+    while ((m = snippetRe.exec(html)) !== null && snippets.length < numResults) {
+      snippets.push(m[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim());
+    }
+
+    if (titles.length === 0) {
+      // Last resort: return plain-text snippet of the page
+      const plainText = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 1500);
+      return `No results parsed. Raw content:\n${plainText}`;
+    }
+
+    return titles.map((t, i) =>
+      `${i + 1}. ${t.title}\n   URL: ${t.url}${snippets[i] ? `\n   ${snippets[i]}` : ''}`
+    ).join('\n\n');
   }
 
   private async scrapeUrl(url: string, mode: string, selector?: string, waitMs?: number): Promise<string> {
@@ -295,7 +354,8 @@ export class AgentExecutor {
       `- For npm/node projects: check package.json first with read_file or list_dir`,
       `- After write_file, verify with read_file if needed`,
       `- After shell_exec, check output for errors and retry if needed`,
-      `- Use relative paths from the working directory`,
+      `- For research tasks: use web_search first, then scrape_url for full page content`,
+    `- Use relative paths from the working directory`,
       `- Be concise in your final response: state what was done and where to find it`,
     ];
     if (extra) lines.push(``, `Context:`, extra);
@@ -307,6 +367,7 @@ export class AgentExecutor {
     if (toolName === 'write_file')  return `"${input.path}"`;
     if (toolName === 'read_file')   return `"${input.path}"`;
     if (toolName === 'list_dir')    return `"${input.path ?? '.'}"`;
+    if (toolName === 'web_search')  return `"${String(input.query ?? '').slice(0, 60)}"`;
     if (toolName === 'scrape_url')  return `"${String(input.url ?? '').slice(0, 60)}" mode=${input.mode ?? 'text'}`;
     return JSON.stringify(input).slice(0, 60);
   }
