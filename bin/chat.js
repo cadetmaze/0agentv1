@@ -758,8 +758,75 @@ async function _safeJsonFetch(url, opts) {
     console.log(`  ${fmt(C.yellow, '⚠')} LLM check failed: ${e.message}\n`);
   }
 
+  // ── Version check — ask to update if newer version is on npm ──────────────
+  try {
+    const pkgPath = resolve(new URL(import.meta.url).pathname, '..', '..', 'package.json');
+    const currentVersion = existsSync(pkgPath)
+      ? JSON.parse(readFileSync(pkgPath, 'utf8')).version
+      : null;
+
+    if (currentVersion) {
+      const reg = await fetch('https://registry.npmjs.org/0agent/latest', {
+        signal: AbortSignal.timeout(4000),
+      }).then(r => r.json()).catch(() => null);
+
+      const latest = reg?.version;
+      if (latest && latest !== currentVersion && isNewerVersion(latest, currentVersion)) {
+        console.log(`\n  ${fmt(C.yellow, '↑')} Update available: ${fmt(C.dim, currentVersion)} → ${fmt(C.bold + C.green, latest)}`);
+        process.stdout.write(`  Update now? ${fmt(C.bold, '[y/N]')} `);
+
+        await new Promise((res) => {
+          const handler = async (buf) => {
+            const answer = buf.toString().trim().toLowerCase();
+            process.stdout.write(answer + '\n');
+            if (answer === 'y') {
+              process.stdout.write(`\n  ${fmt(C.dim, 'Installing 0agent@latest...')}\n`);
+              try {
+                const { execSync: exs } = await import('node:child_process');
+                exs('npm install -g 0agent@latest', { stdio: 'inherit', timeout: 120_000 });
+                process.stdout.write(`\n  ${fmt(C.green, '✓')} Updated to ${latest} — restarting...\n\n`);
+                // Restart: spawn new instance, exit current
+                const { spawn: sp } = await import('node:child_process');
+                const child = sp(process.argv[0], process.argv.slice(1), { stdio: 'inherit' });
+                child.on('close', (code) => process.exit(code ?? 0));
+                process.stdin.pause();
+              } catch (e) {
+                process.stdout.write(`\n  ${fmt(C.red, '✗')} Update failed: ${e.message}\n  Try manually: npm install -g 0agent@latest\n\n`);
+                rl.prompt();
+              }
+            } else {
+              process.stdout.write(`  ${fmt(C.dim, `Skipping — run: npm install -g 0agent@${latest} to update later`)}\n\n`);
+              rl.prompt();
+            }
+            res();
+          };
+
+          // Single keypress if TTY, line otherwise
+          if (process.stdin.isTTY) {
+            process.stdin.once('data', handler);
+          } else {
+            rl.once('line', (line) => handler(Buffer.from(line)));
+          }
+        });
+        return; // rl.prompt() already called in handler
+      }
+    }
+  } catch {
+    // Version check is non-fatal — never block startup
+  }
+
   rl.prompt();
 })();
+
+function isNewerVersion(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return true;
+    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return false;
+  }
+  return false;
+}
 
 
 rl.on('line', async (input) => {
