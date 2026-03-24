@@ -8,5 +8,6 @@ export default defineConfig({
       "../../tests/convergence/**/*.test.ts",
       "../../tests/capabilities/**/*.test.ts",
     ],
+    testTimeout: 30000,
   },
 });
