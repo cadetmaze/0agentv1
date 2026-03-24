@@ -98,26 +98,63 @@ switch (cmd) {
     await runWatch();
     break;
 
+  case 'memory':
+    await runMemoryCommand(args.slice(1));
+    break;
+
   default:
     showHelp();
     break;
 }
 
-// ─── Init wizard ─────────────────────────────────────────────────────────
+// ─── Init wizard — arrow key selection, GitHub memory built in ───────────────
+
+// Arrow-key select using enquirer (falls back to number input if not available)
+async function arrowSelect(message, choices, initial = 0) {
+  try {
+    const { Select } = await import('enquirer');
+    const prompt = new Select({ message, choices: choices.map((c, i) => ({ name: c, value: i })), initial });
+    const answer = await prompt.run();
+    return choices.indexOf(answer);
+  } catch {
+    // Fallback: number-based selection (no enquirer)
+    return choose(message, choices, initial);
+  }
+}
+
+async function arrowInput(message, initial = '') {
+  try {
+    const { Input } = await import('enquirer');
+    const prompt = new Input({ message, initial });
+    return await prompt.run();
+  } catch {
+    return ask(`  ${message}: `);
+  }
+}
+
+async function arrowPassword(message) {
+  try {
+    const { Password } = await import('enquirer');
+    const prompt = new Password({ message });
+    return await prompt.run();
+  } catch {
+    return ask(`  ${message}: `);
+  }
+}
 
 async function runInit() {
-  console.log('\n  ┌─────────────────────────────────────────┐');
-  console.log('  │                                         │');
-  console.log('  │   0agent — An agent that learns.        │');
-  console.log('  │                                         │');
-  console.log('  │   v1.0.0 · Apache 2.0                   │');
-  console.log('  └─────────────────────────────────────────┘\n');
+  console.log('\n  \x1b[1m┌─────────────────────────────────────────┐\x1b[0m');
+  console.log('  \x1b[1m│                                         │\x1b[0m');
+  console.log('  \x1b[1m│   0agent — An agent that learns.        │\x1b[0m');
+  console.log('  \x1b[1m│                                         │\x1b[0m');
+  console.log('  \x1b[1m│   v1.0 · Apache 2.0                     │\x1b[0m');
+  console.log('  \x1b[1m└─────────────────────────────────────────┘\x1b[0m\n');
 
-  // Check if already initialised
   if (existsSync(CONFIG_PATH)) {
-    const answer = await ask('Config already exists. Reinitialise? [y/N] ');
+    const answer = await ask('  Config already exists. Reinitialise? [y/N] ');
     if (answer.toLowerCase() !== 'y') {
-      console.log('\n  Run `0agent start` to start the daemon.\n');
+      console.log('\n  Running: 0agent start\n');
+      await startDaemon();
       return;
     }
   }
@@ -127,96 +164,110 @@ async function runInit() {
   mkdirSync(resolve(AGENT_DIR, 'skills', 'builtin'), { recursive: true });
   mkdirSync(resolve(AGENT_DIR, 'skills', 'custom'), { recursive: true });
 
-  console.log('  Step 1 of 5: LLM Provider\n');
-  const provider = await choose('  Which LLM provider?', [
+  // ── Step 1: LLM Provider ────────────────────────────────────────────────
+  const providerIdx = await arrowSelect('LLM Provider', [
     'Anthropic (Claude)  ← recommended',
     'OpenAI (GPT-4o)',
     'xAI (Grok)',
     'Google (Gemini)',
-    'Ollama (local, free)',
+    'Ollama (local — no API key)',
   ], 0);
-  const providerKey = ['anthropic', 'openai', 'xai', 'gemini', 'ollama'][provider];
+  const providerKey = ['anthropic', 'openai', 'xai', 'gemini', 'ollama'][providerIdx];
 
-  // Model selection per provider
   const MODELS = {
-    anthropic: [
-      'claude-sonnet-4-6  ← recommended (fast + smart)',
-      'claude-opus-4-6    (most capable, slower)',
-      'claude-haiku-4-5   (fastest, cheapest)',
-    ],
-    openai: [
-      'gpt-4o             ← recommended',
-      'gpt-4o-mini        (faster, cheaper)',
-      'o3-mini            (reasoning)',
-    ],
-    xai: [
-      'grok-3             ← recommended',
-      'grok-3-mini',
-    ],
-    gemini: [
-      'gemini-2.0-flash   ← recommended',
-      'gemini-2.0-pro',
-    ],
-    ollama: [
-      'llama3.1           ← recommended',
-      'mistral',
-      'codellama',
-    ],
+    anthropic: ['claude-sonnet-4-6  ← recommended', 'claude-opus-4-6  (most capable)', 'claude-haiku-4-5  (fastest)'],
+    openai:    ['gpt-4o  ← recommended', 'gpt-4o-mini', 'o3-mini'],
+    xai:       ['grok-3  ← recommended', 'grok-3-mini'],
+    gemini:    ['gemini-2.0-flash  ← recommended', 'gemini-2.0-pro'],
+    ollama:    ['llama3.1  ← recommended', 'mistral', 'codellama'],
   };
-
-  let model = '';
-  if (MODELS[providerKey]) {
-    console.log();
-    const modelIdx = await choose('  Which model?', MODELS[providerKey], 0);
-    model = MODELS[providerKey][modelIdx].split(/\s+/)[0];
-  }
+  const modelIdx = await arrowSelect('Which model?', MODELS[providerKey], 0);
+  const model = MODELS[providerKey][modelIdx].split(/\s+/)[0];
 
   let apiKey = '';
   if (providerKey !== 'ollama') {
-    apiKey = await ask(`\n  API Key: `);
-    if (!apiKey.trim()) {
-      console.log('  ⚠️  No API key provided. You can set it later in ~/.0agent/config.yaml');
+    apiKey = await arrowPassword(`${providerKey} API key`);
+    apiKey = apiKey.trim();
+    if (!apiKey) {
+      console.log('  \x1b[33m⚠\x1b[0m  No key — add it later in ~/.0agent/config.yaml');
     } else {
-      // Validate key format
-      const keyPrefixes = { anthropic: 'sk-ant-', openai: 'sk-', xai: 'xai-', gemini: 'AI' };
-      const expectedPrefix = keyPrefixes[providerKey];
-      if (expectedPrefix && !apiKey.startsWith(expectedPrefix)) {
-        console.log(`  ⚠️  Key doesn't look like a ${providerKey} key (expected: ${expectedPrefix}...)`);
+      const pfx = { anthropic: 'sk-ant-', openai: 'sk-', xai: 'xai-', gemini: 'AI' }[providerKey];
+      if (pfx && !apiKey.startsWith(pfx)) {
+        console.log(`  \x1b[33m⚠\x1b[0m  Unexpected key format (expected ${pfx}...)`);
       } else {
-        console.log('  ✓ API key format looks valid');
+        console.log('  \x1b[32m✓\x1b[0m  Key format valid');
       }
     }
   }
 
-  console.log('\n  Step 2 of 5: Embedding model\n');
-  const embedding = await choose('  Embedding backend?', [
-    'Local via Ollama (nomic-embed-text)  ← free, private',
-    'OpenAI text-embedding-3-small (cloud)',
-    'Skip (text-only mode)',
+  // ── Step 2: GitHub Memory ───────────────────────────────────────────────
+  const memChoice = await arrowSelect('Back up memory to GitHub?', [
+    'Yes — private repo, free, cross-device sync  ← recommended',
+    'No — local only',
   ], 0);
-  const embeddingProvider = ['nomic-ollama', 'openai', 'none'][embedding];
 
-  console.log('\n  Step 3 of 5: Sandbox backend\n');
+  let ghToken = '', ghOwner = '', ghRepo = '0agent-memory';
+  if (memChoice === 0) {
+    // Try gh CLI first
+    try {
+      const { execSync: ex } = await import('node:child_process');
+      ghToken = ex('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim();
+      ghOwner = ex('gh api user --jq .login 2>/dev/null', { encoding: 'utf8' }).trim();
+      if (ghToken && ghOwner) {
+        console.log(`  \x1b[32m✓\x1b[0m  gh CLI — authenticated as \x1b[1m${ghOwner}\x1b[0m`);
+      }
+    } catch {}
+
+    if (!ghToken) {
+      console.log('\n  Create a GitHub token: \x1b[4mhttps://github.com/settings/tokens/new\x1b[0m');
+      console.log('  Required scope: \x1b[1mrepo\x1b[0m\n');
+      ghToken = await arrowPassword('GitHub token (ghp_...)');
+      ghToken = ghToken.trim();
+      if (ghToken) {
+        ghOwner = await verifyGitHubToken(ghToken) ?? '';
+        if (!ghOwner) {
+          console.log('  \x1b[31m✗\x1b[0m  Invalid token — skipping GitHub memory');
+          ghToken = '';
+        } else {
+          console.log(`  \x1b[32m✓\x1b[0m  Authenticated as \x1b[1m${ghOwner}\x1b[0m`);
+        }
+      }
+    }
+
+    if (ghToken && ghOwner) {
+      process.stdout.write(`  Creating private repo \x1b[1m${ghOwner}/0agent-memory\x1b[0m...`);
+      const ok = await createGitHubRepo(ghToken, '0agent-memory');
+      console.log(ok ? ' \x1b[32m✓\x1b[0m' : ' \x1b[33m(exists)\x1b[0m');
+    }
+  }
+
+  // ── Step 3: Embedding ────────────────────────────────────────────────────
+  const embIdx = await arrowSelect('Embeddings (for semantic memory search)?', [
+    'Local via Ollama (nomic-embed-text) — free, private',
+    'OpenAI text-embedding-3-small — cloud',
+    'Skip — text-only mode',
+  ], 0);
+  const embeddingProvider = ['nomic-ollama', 'openai', 'none'][embIdx];
+
+  // ── Step 4: Sandbox ──────────────────────────────────────────────────────
   const sandboxes = detectSandboxes();
-  console.log(`  Detected: ${sandboxes.join(', ') || 'process (fallback)'}`);
   const sandboxChoice = sandboxes[0] ?? 'process';
-  console.log(`  Using: ${sandboxChoice}`);
+  console.log(`\n  Sandbox: \x1b[32m${sandboxChoice}\x1b[0m detected`);
 
-  console.log('\n  Step 4 of 5: Seed graph\n');
-  const seed = await choose('  Start with a seed graph?', [
-    'software-engineering (skills + sprint workflow)  ← recommended',
-    'scratch (empty graph)',
+  // ── Step 5: Seed graph ───────────────────────────────────────────────────
+  const seedIdx = await arrowSelect('Starting knowledge?', [
+    'software-engineering — sprint workflow + 15 skills  ← recommended',
+    'Start from scratch',
   ], 0);
-  const seedName = seed === 0 ? 'software-engineering' : null;
+  const seedName = seedIdx === 0 ? 'software-engineering' : null;
 
-  // Step 5: confirm
-  console.log('\n  Step 5 of 5: Ready\n');
-  console.log(`  Provider:  ${providerKey}`);
-  console.log(`  Model:     ${model}`);
-  console.log(`  API Key:   ${apiKey ? apiKey.slice(0, 8) + '••••••••' : '(not set)'}`);
-  console.log(`  Sandbox:   ${sandboxChoice}`);
-  console.log(`  Seed:      ${seedName ?? 'scratch'}`);
-  console.log();
+  // ── Summary ───────────────────────────────────────────────────────────────
+  console.log('\n  \x1b[1mReady to launch\x1b[0m\n');
+  console.log(`  LLM:     \x1b[36m${providerKey}/${model}\x1b[0m`);
+  console.log(`  API Key: ${apiKey ? '\x1b[32m✓ set\x1b[0m (' + apiKey.slice(0, 8) + '••••)' : '\x1b[33mnot set\x1b[0m'}`);
+  console.log(`  Memory:  ${ghToken ? `\x1b[32mgithub.com/${ghOwner}/0agent-memory\x1b[0m` : '\x1b[2mlocal only\x1b[0m'}`);
+  console.log(`  Sandbox: \x1b[36m${sandboxChoice}\x1b[0m`);
+  console.log(`  Seed:    \x1b[36m${seedName ?? 'scratch'}\x1b[0m\n`);
 
   // Write config
   const dbPath    = resolve(AGENT_DIR, 'graph.db');
@@ -252,6 +303,7 @@ graph:
   hnsw_path: "${hnswPath}"
   object_store_path: "${objPath}"
 ${seedName ? `\nseed: "${seedName}"` : ''}
+${ghToken && ghOwner ? `\ngithub_memory:\n  enabled: true\n  token: "${ghToken}"\n  owner: "${ghOwner}"\n  repo: "${ghRepo}"` : ''}
 `;
 
   writeFileSync(CONFIG_PATH, config, 'utf8');
@@ -807,6 +859,191 @@ async function waitForTunnelUrl(proc, pattern, timeout) {
     const timer = setTimeout(() => { cleanup(); resolve(null); }, timeout);
     const cleanup = () => { clearTimeout(timer); proc.stdout?.removeListener('data', onData); proc.stderr?.removeListener('data', onData); };
   });
+}
+
+// ─── Memory sync (GitHub backend) ─────────────────────────────────────────
+
+async function runMemoryCommand(memArgs) {
+  const sub = memArgs[0] ?? 'status';
+
+  switch (sub) {
+    // ── 0agent memory connect github ──────────────────────────────────────
+    case 'connect': {
+      const provider = memArgs[1] ?? 'github';
+      if (provider !== 'github') { console.log('  Only GitHub is supported: 0agent memory connect github'); break; }
+
+      console.log('\n  \x1b[1m0agent Memory — GitHub Sync\x1b[0m\n');
+      console.log('  Your knowledge graph will be backed up to a private GitHub repository.');
+      console.log('  Free, versioned, cross-device. No server needed.\n');
+
+      // ── Authentication ──
+      let token = '';
+
+      // Try gh CLI first (already logged in for most devs)
+      try {
+        const { execSync: ex } = await import('node:child_process');
+        token = ex('gh auth token 2>/dev/null', { encoding: 'utf8' }).trim();
+        if (token) {
+          const { execSync: ex2 } = await import('node:child_process');
+          const user = ex2('gh api user --jq .login 2>/dev/null', { encoding: 'utf8' }).trim();
+          console.log(`  \x1b[32m✓\x1b[0m Detected gh CLI — authenticated as \x1b[1m${user}\x1b[0m`);
+        }
+      } catch {}
+
+      // Fallback: GitHub Device Flow
+      if (!token) {
+        console.log('  \x1b[2mgh CLI not found — using GitHub token auth\x1b[0m\n');
+        console.log('  Create a token at: \x1b[4mhttps://github.com/settings/tokens/new\x1b[0m');
+        console.log('  Required scope: \x1b[1mrepo\x1b[0m\n');
+        token = await ask('  Paste token (starts with ghp_): ');
+        token = token.trim();
+        if (!token) { console.log('  No token provided.'); break; }
+      }
+
+      // Verify token
+      const owner = await verifyGitHubToken(token);
+      if (!owner) { console.log('  \x1b[31m✗\x1b[0m Invalid token or no access.'); break; }
+      console.log(`  \x1b[32m✓\x1b[0m Authenticated as \x1b[1m${owner}\x1b[0m`);
+
+      // ── Create repo ──
+      const repoName = memArgs[2] ?? '0agent-memory';
+      process.stdout.write(`  Creating private repo \x1b[1m${owner}/${repoName}\x1b[0m...`);
+      const created = await createGitHubRepo(token, repoName);
+      console.log(created ? ' \x1b[32m✓\x1b[0m' : ' \x1b[33m(already exists)\x1b[0m');
+
+      // ── Save to config ──
+      const YAML = await import('yaml');
+      const { readFileSync: rf, writeFileSync: wf, existsSync: ef } = await import('node:fs');
+      if (ef(CONFIG_PATH)) {
+        let cfg = rf(CONFIG_PATH, 'utf8');
+        // Remove old github_memory block if present
+        cfg = cfg.replace(/\ngithub_memory:[\s\S]*?(?=\n\w|\n$|$)/, '');
+        cfg += `\ngithub_memory:\n  enabled: true\n  token: "${token}"\n  owner: "${owner}"\n  repo: "${repoName}"\n`;
+        wf(CONFIG_PATH, cfg, 'utf8');
+      }
+
+      // ── Initial push ──
+      console.log('\n  Performing initial sync...');
+      await requireDaemon();
+      const result = await daemonMemorySync('push');
+      if (result?.pushed) {
+        console.log(`  \x1b[32m✓\x1b[0m Synced — ${result.nodes_synced} nodes, ${result.edges_synced} edges`);
+        console.log(`\n  Memory repo: \x1b[4mhttps://github.com/${owner}/${repoName}\x1b[0m`);
+        console.log('\n  From any machine, run:');
+        console.log(`    \x1b[36m0agent memory connect github --repo ${owner}/${repoName}\x1b[0m\n`);
+      } else {
+        console.log('  \x1b[33m⚠\x1b[0m Initial sync skipped — run `0agent memory sync` after daemon starts.');
+        console.log(`\n  Memory repo: \x1b[4mhttps://github.com/${owner}/${repoName}\x1b[0m\n`);
+      }
+      break;
+    }
+
+    // ── 0agent memory sync ────────────────────────────────────────────────
+    case 'sync': {
+      await requireDaemon();
+      process.stdout.write('  Syncing memory to GitHub...');
+      const result = await daemonMemorySync('push');
+      if (result?.pushed) {
+        console.log(` \x1b[32m✓\x1b[0m  ${result.nodes_synced} nodes, ${result.edges_synced} edges`);
+      } else {
+        console.log(` \x1b[31m✗\x1b[0m  ${result?.error ?? 'No GitHub memory configured'}`);
+        if (!result?.error) console.log('  Run: 0agent memory connect github');
+      }
+      break;
+    }
+
+    // ── 0agent memory pull ───────────────────────────────────────────────
+    case 'pull': {
+      await requireDaemon();
+      process.stdout.write('  Pulling memory from GitHub...');
+      const result = await daemonMemorySync('pull');
+      if (result?.pulled) {
+        console.log(` \x1b[32m✓\x1b[0m  +${result.nodes_synced} nodes, +${result.edges_synced} edges merged`);
+      } else {
+        console.log(` \x1b[31m✗\x1b[0m  ${result?.error ?? 'No GitHub memory configured'}`);
+      }
+      break;
+    }
+
+    // ── 0agent memory status ──────────────────────────────────────────────
+    case 'status': {
+      const YAML = await import('yaml');
+      const { readFileSync: rf, existsSync: ef } = await import('node:fs');
+      if (!ef(CONFIG_PATH)) { console.log('\n  Not initialised. Run: 0agent init\n'); break; }
+
+      const cfg = YAML.parse(rf(CONFIG_PATH, 'utf8'));
+      const ghMem = cfg.github_memory;
+
+      if (!ghMem?.enabled) {
+        console.log('\n  Memory sync: \x1b[33mnot connected\x1b[0m');
+        console.log('  Run: 0agent memory connect github\n');
+      } else {
+        console.log(`\n  Memory sync: \x1b[32m✓ connected\x1b[0m`);
+        console.log(`  Repo:  https://github.com/${ghMem.owner}/${ghMem.repo}`);
+        // Get last sync from daemon
+        try {
+          const res = await fetch(`${BASE_URL}/api/memory/status`).catch(() => null);
+          const data = res?.ok ? await res.json() : null;
+          if (data) {
+            console.log(`  Last push: ${data.pushed_at ? new Date(data.pushed_at).toLocaleString() : 'never'}`);
+            console.log(`  Last pull: ${data.pulled_at ? new Date(data.pulled_at).toLocaleString() : 'never'}`);
+          }
+        } catch {}
+        console.log();
+      }
+      break;
+    }
+
+    // ── 0agent memory disconnect ──────────────────────────────────────────
+    case 'disconnect': {
+      const { readFileSync: rf, writeFileSync: wf, existsSync: ef } = await import('node:fs');
+      if (ef(CONFIG_PATH)) {
+        let cfg = rf(CONFIG_PATH, 'utf8');
+        cfg = cfg.replace(/\ngithub_memory:[\s\S]*?(?=\n\w|\n$|$)/, '');
+        wf(CONFIG_PATH, cfg, 'utf8');
+      }
+      console.log('  \x1b[32m✓\x1b[0m GitHub memory sync disabled. Local graph unchanged.');
+      break;
+    }
+
+    default:
+      console.log('  Usage: 0agent memory connect github | sync | pull | status | disconnect');
+  }
+}
+
+async function verifyGitHubToken(token) {
+  try {
+    const res = await fetch('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${token}`, 'User-Agent': '0agent/1.0' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const user = await res.json();
+    return user.login;
+  } catch { return null; }
+}
+
+async function createGitHubRepo(token, repoName) {
+  const res = await fetch('https://api.github.com/user/repos', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': '0agent/1.0' },
+    body: JSON.stringify({
+      name: repoName,
+      description: '0agent memory — knowledge graph backed up automatically',
+      private: true,
+      auto_init: true,
+    }),
+    signal: AbortSignal.timeout(10000),
+  });
+  return res.ok || res.status === 422; // 422 = already exists
+}
+
+async function daemonMemorySync(direction) {
+  try {
+    const res = await fetch(`${BASE_URL}/api/memory/${direction}`, { method: 'POST' });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch { return null; }
 }
 
 // ─── Result preview — confirms the agent's work actually ran ────────────────

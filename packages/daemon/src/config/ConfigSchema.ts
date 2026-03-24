@@ -115,6 +115,12 @@ export const DaemonConfigSchema = z.object({
   seed: z.string().optional(),
   self_improvement: SelfImprovementConfigSchema.default({}),
   entity_nesting: EntityNestingConfigSchema.default({}),
+  github_memory: z.object({
+    enabled: z.boolean().default(false),
+    token:   z.string().default(''),
+    owner:   z.string().default(''),
+    repo:    z.string().default('0agent-memory'),
+  }).default({}),
 });
 
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;

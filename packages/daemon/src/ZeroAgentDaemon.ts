@@ -41,6 +41,7 @@ import { IdentityManager } from './IdentityManager.js';
 import { ProjectScanner } from './ProjectScanner.js';
 import { TeamManager } from './TeamManager.js';
 import { TeamSync } from './TeamSync.js';
+import { GitHubMemorySync } from './GitHubMemorySync.js';
 import type { DaemonStatus } from './routes/health.js';
 
 // ─── Types ───────────────────────────────────────────
@@ -62,6 +63,9 @@ export class ZeroAgentDaemon {
   private httpServer: HTTPServer | null = null;
   private skillRegistry: SkillRegistry | null = null;
   private backgroundWorkers: BackgroundWorkers | null = null;
+  private githubMemorySync: GitHubMemorySync | null = null;
+  private memorySyncTimer: ReturnType<typeof setInterval> | null = null;
+  private proactiveSurfaceInstance: unknown = null;
   private startedAt: number = 0;
   private pidFilePath: string;
 
@@ -111,6 +115,22 @@ export class ZeroAgentDaemon {
       console.warn('[0agent] No LLM API key configured — tasks will not call the LLM');
     }
 
+    // 5.0 — GitHub memory sync: pull on startup if configured
+    const ghMemCfg = (this.config as Record<string, unknown>)['github_memory'] as
+      { enabled?: boolean; token?: string; owner?: string; repo?: string } | undefined;
+    if (ghMemCfg?.enabled && ghMemCfg.token && ghMemCfg.owner && ghMemCfg.repo) {
+      this.githubMemorySync = new GitHubMemorySync(
+        { token: ghMemCfg.token, owner: ghMemCfg.owner, repo: ghMemCfg.repo },
+        this.adapter,
+        this.graph,
+      );
+      console.log(`[0agent] Memory sync: github.com/${ghMemCfg.owner}/${ghMemCfg.repo}`);
+      // Pull in background — don't block startup
+      this.githubMemorySync.pull().then(r => {
+        if (r.pulled) console.log(`[0agent] Memory pulled: +${r.nodes_synced} nodes, +${r.edges_synced} edges`);
+      }).catch(() => {});
+    }
+
     // 5.5 — Collab-1: initialize user identity + project context
     const cwd = process.env['ZEROAGENT_CWD'] ?? process.cwd();
     const identityManager = new IdentityManager(this.graph);
@@ -151,6 +171,20 @@ export class ZeroAgentDaemon {
       ? new TeamSync(teamManager, this.adapter, identity.entity_node_id)
       : null;
 
+    // 6.5.5 — GitHub memory: auto-push every 30 minutes if dirty
+    if (this.githubMemorySync) {
+      const memSync = this.githubMemorySync;
+      this.memorySyncTimer = setInterval(async () => {
+        if (memSync.hasPendingChanges()) {
+          const result = await memSync.push().catch(() => null);
+          if (result?.pushed) {
+            console.log(`[0agent] Memory auto-synced: ${result.nodes_synced} nodes`);
+          }
+        }
+      }, 30 * 60 * 1000); // 30 minutes
+      if (typeof this.memorySyncTimer === 'object') (this.memorySyncTimer as any).unref?.();
+    }
+
     // 6.6 — Collab-2: ProactiveSurface loaded lazily (file may not exist yet)
     let proactiveSurface = null;
     try {
@@ -177,6 +211,7 @@ export class ZeroAgentDaemon {
 
     // 8. Create HTTPServer, start it
     this.startedAt = Date.now();
+    const memSyncRef = this.githubMemorySync;
     this.httpServer = new HTTPServer({
       port: this.config.server.port,
       host: this.config.server.host,
@@ -185,6 +220,8 @@ export class ZeroAgentDaemon {
       traceStore: this.traceStore,
       skillRegistry: this.skillRegistry,
       getStatus: () => this.getStatus(),
+      getMemorySync: () => memSyncRef,
+      proactiveSurface: proactiveSurface as any,
     });
     await this.httpServer.start();
 
@@ -222,6 +259,13 @@ export class ZeroAgentDaemon {
       this.backgroundWorkers.stop();
       this.backgroundWorkers = null;
     }
+
+    // Final push on shutdown — capture last session's learning
+    if (this.githubMemorySync?.hasPendingChanges()) {
+      await this.githubMemorySync.push('sync: daemon shutdown').catch(() => {});
+    }
+    if (this.memorySyncTimer) { clearInterval(this.memorySyncTimer); this.memorySyncTimer = null; }
+    this.githubMemorySync = null;
 
     this.sessionManager = null;
     this.skillRegistry = null;

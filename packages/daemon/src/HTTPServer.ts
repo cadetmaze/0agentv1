@@ -31,8 +31,12 @@ import { entityRoutes } from './routes/entities.js';
 import { traceRoutes } from './routes/traces.js';
 import { subagentRoutes } from './routes/subagents.js';
 import { skillRoutes } from './routes/skills.js';
+import { insightsRoutes } from './routes/insights.js';
+import { memoryRoutes } from './routes/memory.js';
 import type { SessionManager } from './SessionManager.js';
 import type { SkillRegistry } from './SkillRegistry.js';
+import type { GitHubMemorySync } from './GitHubMemorySync.js';
+import type { ProactiveSurface } from './ProactiveSurface.js';
 
 export interface HTTPServerDeps {
   port: number;
@@ -42,6 +46,8 @@ export interface HTTPServerDeps {
   traceStore: TraceStore;
   skillRegistry: SkillRegistry;
   getStatus: () => DaemonStatus;
+  getMemorySync?: () => GitHubMemorySync | null;
+  proactiveSurface?: ProactiveSurface | null;
 }
 
 export class HTTPServer {
@@ -61,6 +67,8 @@ export class HTTPServer {
     this.app.route('/api/traces', traceRoutes({ traceStore: deps.traceStore }));
     this.app.route('/api/subagents', subagentRoutes());
     this.app.route('/api/skills', skillRoutes({ skillRegistry: deps.skillRegistry }));
+    this.app.route('/api/insights', insightsRoutes({ proactiveSurface: deps.proactiveSurface ?? null }));
+    this.app.route('/api/memory',   memoryRoutes({ getSync: deps.getMemorySync ?? (() => null) }));
 
     // Serve 3D knowledge graph at root and /graph
     const serveGraph = (c: any) => {
