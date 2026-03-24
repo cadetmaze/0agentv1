@@ -45,7 +45,22 @@ if (cmd.startsWith('/')) {
 
 // ─── Command dispatch ────────────────────────────────────────────────────
 switch (cmd) {
-  case '':
+  case '': {
+    // No args: if configured → open chat TUI; if not → run init wizard
+    if (existsSync(CONFIG_PATH)) {
+      const { spawn: spawnC } = await import('node:child_process');
+      const chatSc = resolve(dirname(new URL(import.meta.url).pathname), 'chat.js');
+      if (existsSync(chatSc)) {
+        const p = spawnC(process.execPath, [chatSc], { stdio: 'inherit' });
+        await new Promise(r => p.on('close', r));
+      } else {
+        await runChat();
+      }
+    } else {
+      await runInit();
+    }
+    break;
+  }
   case 'init':
     await runInit();
     break;
@@ -66,9 +81,18 @@ switch (cmd) {
     await runTask(args.slice(1));
     break;
 
-  case 'chat':
-    await runChat();
+  case 'chat': {
+    // Launch the persistent Claude Code-style TUI
+    const { spawn: spawnChat } = await import('node:child_process');
+    const chatScript = resolve(dirname(new URL(import.meta.url).pathname), 'chat.js');
+    if (existsSync(chatScript)) {
+      const p = spawnChat(process.execPath, [chatScript], { stdio: 'inherit' });
+      await new Promise(r => p.on('close', r));
+    } else {
+      await runChat(); // fallback to old simple REPL
+    }
     break;
+  }
 
   case 'skill':
     await runSkillCommand(args.slice(1));

@@ -1,18 +1,20 @@
 {
   "name": "0agent",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
   "private": false,
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "0agent": "./bin/0agent.js"
+    "0agent": "./bin/0agent.js",
+    "0agent-chat": "./bin/chat.js"
   },
   "files": [
     "bin/",
     "dist/",
     "skills/",
-    "seeds/"
+    "seeds/",
+    "bin/chat.js"
   ],
   "scripts": {
     "build": "turbo run build",
