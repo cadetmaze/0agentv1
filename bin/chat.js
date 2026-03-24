@@ -457,50 +457,104 @@ printInsights();
 // Connect WebSocket for live events
 connectWS();
 
-// ── Startup: check daemon + LLM connection ──────────────────────────────────
+// ── Startup: ensure fresh daemon + verify LLM ────────────────────────────────
+async function _spawnDaemon() {
+  const pkgRoot = resolve(new URL(import.meta.url).pathname, '..', '..');
+  const bundled  = resolve(pkgRoot, 'dist', 'daemon.mjs');
+  if (!existsSync(bundled) || !existsSync(CONFIG_PATH)) return false;
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, [bundled], {
+    detached: true, stdio: 'ignore',
+    env: { ...process.env, ZEROAGENT_CONFIG: CONFIG_PATH },
+  });
+  child.unref();
+  // Wait up to 10s for daemon to be ready
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(500) });
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
+async function _safeJsonFetch(url, opts) {
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try { return { status: res.status, data: JSON.parse(text) }; }
+  catch { return { status: res.status, data: null, raw: text }; }
+}
+
 (async () => {
   const startSpin = new Spinner('Starting daemon');
 
-  // Step 1: ensure daemon is running
+  // Step 1: Check if daemon is running AND up-to-date (has /api/llm/ping)
   let daemonOk = false;
+  let needsRestart = false;
+
   try {
     await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(1500) });
-    daemonOk = true;
-  } catch {
-    // Auto-start
-    startSpin.start();
-    const pkgRoot = resolve(new URL(import.meta.url).pathname, '..', '..');
-    const bundled  = resolve(pkgRoot, 'dist', 'daemon.mjs');
-    if (existsSync(bundled) && existsSync(CONFIG_PATH)) {
-      const { spawn } = await import('node:child_process');
-      const child = spawn(process.execPath, [bundled], { detached: true, stdio: 'ignore', env: { ...process.env, ZEROAGENT_CONFIG: CONFIG_PATH } });
-      child.unref();
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        try { await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(500) }); daemonOk = true; break; } catch {}
-      }
+    // Daemon running — check if it has the new /api/llm/ping route
+    const probe = await _safeJsonFetch(`${BASE_URL}/api/llm/ping`, {
+      method: 'POST', signal: AbortSignal.timeout(3000),
+    });
+    if (probe.status === 404 || probe.data === null) {
+      // Old daemon without this route — needs restart
+      needsRestart = true;
+    } else {
+      daemonOk = true;
     }
-    startSpin.stop();
-    if (daemonOk) process.stdout.write(`  ${fmt(C.green, '✓')} Daemon ready\n`);
-    else { console.log(`  ${fmt(C.red, '✗')} Daemon failed. Run: 0agent start`); rl.prompt(); return; }
+  } catch {
+    // Daemon not running at all
   }
 
-  // Step 2: test LLM via the DAEMON (proves the daemon can reach the API, not just the CLI)
+  if (needsRestart) {
+    startSpin.start('Restarting daemon (new version)');
+    // Kill old daemon
+    try {
+      const { execSync } = await import('node:child_process');
+      execSync('pkill -f "daemon.mjs" 2>/dev/null; true', { stdio: 'ignore' });
+    } catch {}
+    await new Promise(r => setTimeout(r, 800));
+    daemonOk = await _spawnDaemon();
+  } else if (!daemonOk) {
+    startSpin.start('Starting daemon');
+    daemonOk = await _spawnDaemon();
+  }
+
+  startSpin.stop();
+  if (!daemonOk) {
+    console.log(`  ${fmt(C.red, '✗')} Daemon failed to start. Run: 0agent start`);
+    rl.prompt();
+    return;
+  }
+  if (needsRestart) {
+    process.stdout.write(`  ${fmt(C.green, '✓')} Daemon updated\n`);
+  } else if (!daemonOk) {
+    process.stdout.write(`  ${fmt(C.green, '✓')} Daemon ready\n`);
+  } else {
+    // Was already running and up to date — show nothing (already running)
+    process.stdout.write(`  ${fmt(C.green, '✓')} Daemon ready\n`);
+  }
+
+  // Step 2: LLM check via daemon (not direct — this proves daemon↔API works)
   const provider = getCurrentProvider(cfg);
   const llmSpin = new Spinner(`Checking ${provider?.provider ?? 'LLM'}/${provider?.model ?? '...'}`);
   llmSpin.start();
   try {
-    const res = await fetch(`${BASE_URL}/api/llm/ping`, {
+    const { data } = await _safeJsonFetch(`${BASE_URL}/api/llm/ping`, {
       method: 'POST',
       signal: AbortSignal.timeout(15_000),
     });
-    const data = await res.json();
     llmSpin.stop();
-    if (data.ok) {
-      console.log(`  ${fmt(C.green, '✓')} ${fmt(C.cyan, data.provider + '/' + data.model)} — ${data.latency_ms}ms\n`);
+    if (data?.ok) {
+      console.log(`  ${fmt(C.green, '✓')} ${fmt(C.cyan, (data.provider ?? '') + '/' + (data.model ?? ''))} — ${data.latency_ms}ms\n`);
+    } else if (data) {
+      console.log(`  ${fmt(C.red, '✗')} LLM error: ${data.error}`);
+      console.log(`  ${fmt(C.dim, 'Fix: /key ' + (provider?.provider ?? 'anthropic') + ' <api-key>')}\n`);
     } else {
-      console.log(`  ${fmt(C.red, '✗')} LLM unreachable: ${data.error}`);
-      console.log(`  ${fmt(C.dim, 'Fix: /key ' + (provider?.provider ?? 'anthropic') + ' <your-api-key>')}\n`);
+      console.log(`  ${fmt(C.yellow, '⚠')} LLM ping returned unexpected response\n`);
     }
   } catch (e) {
     llmSpin.stop();
@@ -532,6 +586,24 @@ rl.on('close', () => {
 });
 
 process.on('SIGINT', () => {
-  console.log(`\n  ${fmt(C.dim, 'Ctrl+C — type /help for commands or Ctrl+C again to exit')}\n`);
-  rl.prompt();
+  if (pendingResolve) {
+    // Session in progress — cancel it, don't exit
+    process.stdout.write(`\n  ${fmt(C.yellow, '↩')} Cancelled\n`);
+    spinner.stop();
+    if (sessionId) {
+      fetch(`${BASE_URL}/api/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => {});
+    }
+    const resolve_ = pendingResolve;
+    pendingResolve = null;
+    sessionId = null;
+    resolve_();
+    rl.prompt();
+  } else {
+    // Not busy — show hint on first press
+    process.stdout.write(`\n  ${fmt(C.dim, 'Press Ctrl+C again to exit')}\n`);
+    rl.prompt();
+    // Second Ctrl+C within 1.5s exits
+    const timeout = setTimeout(() => {}, 1500);
+    process.once('SIGINT', () => { clearTimeout(timeout); process.exit(0); });
+  }
 });

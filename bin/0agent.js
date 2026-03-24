@@ -1318,8 +1318,26 @@ async function isDaemonRunning() {
   }
 }
 
+async function isDaemonFresh() {
+  // Check if the running daemon has the /api/llm/ping route (1.0.26+)
+  try {
+    const res = await fetch(`${BASE_URL}/api/llm/ping`, { method: 'POST', signal: AbortSignal.timeout(2000) });
+    return res.status !== 404;
+  } catch { return false; }
+}
+
 async function requireDaemon() {
-  if (await isDaemonRunning()) return;
+  if (await isDaemonRunning()) {
+    // Kill and restart if it's an old version without key routes
+    if (!(await isDaemonFresh())) {
+      process.stdout.write('  Updating daemon...');
+      try { execSync('pkill -f "daemon.mjs" 2>/dev/null; true', { stdio: 'ignore' }); } catch {}
+      await sleep(800);
+      // fall through to start fresh daemon below
+    } else {
+      return; // up to date, no action needed
+    }
+  }
 
   // Auto-start if config exists — no manual `0agent start` needed
   if (!existsSync(CONFIG_PATH)) {
