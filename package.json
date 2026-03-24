@@ -1,6 +1,6 @@
 {
   "name": "0agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
   "private": false,
   "license": "Apache-2.0",
@@ -11,26 +11,34 @@
   "files": [
     "bin/",
     "packages/core/dist/",
+    "packages/core/package.json",
     "packages/mcp-hub/dist/",
+    "packages/mcp-hub/package.json",
     "packages/daemon/dist/",
+    "packages/daemon/package.json",
     "packages/subagent/dist/",
+    "packages/subagent/package.json",
     "packages/subagent-runtime/dist/",
+    "packages/subagent-runtime/package.json",
     "skills/",
-    "seeds/"
+    "seeds/",
+    "pnpm-workspace.yaml",
+    "turbo.json",
+    "tsconfig.base.json"
   ],
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",
     "lint": "turbo run lint",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build --filter='!@0agent/dashboard' --filter='!@0agent/core-native'"
   },
   "dependencies": {
-    "@0agent/core": "workspace:*",
-    "@0agent/daemon": "workspace:*",
-    "@0agent/mcp-hub": "workspace:*",
-    "@0agent/subagent": "workspace:*",
-    "@0agent/subagent-runtime": "workspace:*",
-    "ws": "^8.18.0"
+    "better-sqlite3": "^11.6.0",
+    "hono": "^4.6.0",
+    "@hono/node-server": "^1.13.0",
+    "ws": "^8.18.0",
+    "yaml": "^2.6.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
@@ -52,8 +60,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/0agent-oss/0agent"
+    "url": "https://github.com/cadetmaze/0agentv1"
   },
-  "homepage": "https://github.com/0agent-oss/0agent#readme",
+  "homepage": "https://github.com/cadetmaze/0agentv1#readme",
   "packageManager": "pnpm@9.12.0"
 }
