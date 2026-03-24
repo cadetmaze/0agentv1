@@ -535,11 +535,16 @@ async function runSkillCommand(skillArgs) {
       await requireDaemon();
       const res = await fetch(`${BASE_URL}/api/skills`);
       const skills = await res.json();
-      console.log('\n  Available skills:\n');
+      console.log('\n  Built-in skills:\n');
       for (const s of (Array.isArray(skills) ? skills : skills.skills ?? [])) {
-        console.log(`  /${s.name.padEnd(22)} ${s.category.padEnd(10)} ${s.description}`);
+        console.log(`  /${s.name.padEnd(22)} ${s.category?.padEnd(10) ?? ''.padEnd(10)} ${s.description}`);
       }
-      console.log();
+      console.log('\n  Anthropic skills (fetched on demand):\n');
+      const anthropicSkills = ['pdf','docx','xlsx','pptx','web-artifacts-builder','webapp-testing','frontend-design','mcp-builder','algorithmic-art','brand-guidelines','doc-coauthoring','internal-comms','slack-gif-creator','theme-factory','canvas-design','skill-creator','claude-api'];
+      for (const s of anthropicSkills) {
+        console.log(`  /${s.padEnd(30)} fetched from github.com/anthropics/skills`);
+      }
+      console.log('\n  Usage: 0agent /<skill-name> or 0agent run "<task>" --skill <name>\n');
       break;
     }
     case 'show': {

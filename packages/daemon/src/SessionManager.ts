@@ -16,6 +16,7 @@ import type { IEventBus } from './WebSocketEvents.js';
 import { EntityScopedContextLoader } from './EntityScopedContext.js';
 import type { LLMExecutor } from './LLMExecutor.js';
 import { AgentExecutor } from './AgentExecutor.js';
+import { AnthropicSkillFetcher } from './AnthropicSkillFetcher.js';
 
 // ─── Types ───────────────────────────────────────────
 
@@ -68,6 +69,7 @@ export class SessionManager {
   private graph?: KnowledgeGraph;
   private llm?: LLMExecutor;
   private cwd: string;
+  private anthropicFetcher = new AnthropicSkillFetcher();
 
   constructor(deps: SessionManagerDeps = {}) {
     this.inferenceEngine = deps.inferenceEngine;
@@ -277,6 +279,17 @@ export class SessionManager {
         this.addStep(session.id, 'No inference engine connected — executing task directly');
       }
 
+      // Step 4.5: if skill matches an Anthropic skill, fetch instructions at runtime
+      let anthropicContext: string | undefined;
+      if (enrichedReq.skill && this.anthropicFetcher.isAnthropicSkill(enrichedReq.skill)) {
+        this.addStep(session.id, `Fetching skill instructions: ${enrichedReq.skill}`);
+        const fetched = await this.anthropicFetcher.fetch(enrichedReq.skill);
+        if (fetched) {
+          anthropicContext = this.anthropicFetcher.buildSystemPrompt(fetched);
+          this.addStep(session.id, `Loaded skill: ${fetched.name} (${fetched.cached ? 'cached' : 'fresh'})`);
+        }
+      }
+
       // Step 5: execute via AgentExecutor (real tool calling + streaming)
       if (this.llm?.isConfigured) {
         const executor = new AgentExecutor(
@@ -288,9 +301,13 @@ export class SessionManager {
           (token) => this.emit({ type: 'session.token', session_id: session.id, token }),
         );
 
-        const systemContext = enrichedReq.context?.system_context
-          ? String(enrichedReq.context.system_context)
-          : undefined;
+        // Merge: Anthropic skill instructions + entity personality + any user context
+        const systemContext = [
+          anthropicContext,
+          enrichedReq.context?.system_context
+            ? String(enrichedReq.context.system_context)
+            : undefined,
+        ].filter(Boolean).join('\n\n') || undefined;
 
         const agentResult = await executor.execute(enrichedReq.task, systemContext);
 
