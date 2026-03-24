@@ -45,6 +45,7 @@ import { GitHubMemorySync } from './GitHubMemorySync.js';
 import { CodespaceManager } from './CodespaceManager.js';
 import { SchedulerManager } from './SchedulerManager.js';
 import { RuntimeSelfHeal } from './RuntimeSelfHeal.js';
+import { TelegramBridge } from './TelegramBridge.js';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import type { DaemonStatus } from './routes/health.js';
@@ -74,6 +75,7 @@ export class ZeroAgentDaemon {
   private codespaceManager: CodespaceManager | null = null;
   private schedulerManager: SchedulerManager | null = null;
   private runtimeHealer: RuntimeSelfHeal | null = null;
+  private telegramBridge: TelegramBridge | null = null;
   private startedAt: number = 0;
   private pidFilePath: string;
 
@@ -203,6 +205,8 @@ export class ZeroAgentDaemon {
       projectContext: projectContext ?? undefined,
       adapter: this.adapter,
       agentRoot,   // agent source path — self-improvement tasks read the right files
+      // Mark GitHub memory dirty immediately when facts are extracted — pushes within 2min
+      onMemoryWritten: () => { this.githubMemorySync?.markDirty(); },
     });
 
     // 6.5 — Collab-3: team sync worker (only if member of teams)
@@ -220,7 +224,7 @@ export class ZeroAgentDaemon {
             console.log(`[0agent] Memory auto-synced: ${result.nodes_synced} nodes`);
           }
         }
-      }, 30 * 60 * 1000); // 30 minutes
+      }, 2 * 60 * 1000); // 2 minutes — push whenever dirty
       if (typeof this.memorySyncTimer === 'object') (this.memorySyncTimer as any).unref?.();
     }
 
@@ -257,6 +261,13 @@ export class ZeroAgentDaemon {
     // 6.8 — Scheduler: create after sessionManager (needs it to fire jobs)
     this.schedulerManager = new SchedulerManager(this.adapter, this.sessionManager, this.eventBus);
     this.schedulerManager.start();
+
+    // 6.9 — Telegram bridge: forward bot messages to 0agent sessions
+    const tgCfg = (this.config as Record<string, unknown>)['telegram'];
+    if (TelegramBridge.isConfigured(tgCfg) && this.sessionManager && this.eventBus) {
+      this.telegramBridge = new TelegramBridge(tgCfg, this.sessionManager, this.eventBus);
+      this.telegramBridge.start();
+    }
 
     // 7. Create BackgroundWorkers, start them
     this.backgroundWorkers = new BackgroundWorkers({
@@ -343,6 +354,8 @@ export class ZeroAgentDaemon {
     }
     if (this.memorySyncTimer) { clearInterval(this.memorySyncTimer); this.memorySyncTimer = null; }
     this.githubMemorySync = null;
+    this.telegramBridge?.stop();
+    this.telegramBridge = null;
     this.schedulerManager?.stop();
     this.schedulerManager = null;
     this.codespaceManager?.closeTunnel();

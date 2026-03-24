@@ -12,7 +12,7 @@ import type {
   IInferenceEngine,
   SQLiteAdapter,
 } from '@0agent/core';
-import { WeightEventLog, EdgeWeightUpdater } from '@0agent/core';
+import { WeightEventLog, EdgeWeightUpdater, NodeType, createNode } from '@0agent/core';
 
 import type { IEventBus } from './WebSocketEvents.js';
 import { EntityScopedContextLoader } from './EntityScopedContext.js';
@@ -70,7 +70,8 @@ export interface SessionManagerDeps {
   identity?: UserIdentity;
   projectContext?: ProjectContext;
   adapter?: SQLiteAdapter;
-  agentRoot?: string;  // path to 0agent source for self-improvement tasks
+  agentRoot?: string;        // path to 0agent source for self-improvement tasks
+  onMemoryWritten?: () => void; // called when facts are persisted → triggers GitHub sync
 }
 
 // ─── SessionManager ──────────────────────────────────
@@ -88,6 +89,7 @@ export class SessionManager {
   private weightUpdater?: EdgeWeightUpdater;
   private anthropicFetcher = new AnthropicSkillFetcher();
   private agentRoot?: string;
+  private onMemoryWritten?: () => void;
 
   constructor(deps: SessionManagerDeps = {}) {
     this.inferenceEngine = deps.inferenceEngine;
@@ -98,6 +100,7 @@ export class SessionManager {
     this.identity = deps.identity;
     this.projectContext = deps.projectContext;
     this.agentRoot = deps.agentRoot;
+    this.onMemoryWritten = deps.onMemoryWritten;
 
     if (deps.adapter) {
       // Conversation history — so "make it dark mode" knows what "it" is
@@ -446,6 +449,9 @@ export class SessionManager {
         }
         this.addStep(sessionId, `Done (${agentResult.tokens_used} tokens, ${agentResult.iterations} LLM turns)`);
 
+        // Extract and persist factual entities from this conversation to long-term memory
+        this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM).catch(() => {});
+
         this.completeSession(sessionId, {
           output: agentResult.output,
           files_written: agentResult.files_written,
@@ -519,6 +525,75 @@ export class SessionManager {
       if (freshExec.isConfigured) return freshExec;
     } catch {}
     return this.llm;
+  }
+
+  /**
+   * After every session, run a lightweight LLM pass to extract factual entities
+   * (name, projects, tech, preferences, URLs) and persist them to the graph.
+   * This catches everything the agent didn't explicitly memory_write during execution.
+   */
+  private async _extractAndPersistFacts(task: string, output: string, llm: LLMExecutor): Promise<void> {
+    if (!this.graph || !llm.isConfigured) return;
+
+    const prompt = `Extract factual entities from this conversation that should be remembered long-term.
+Return ONLY a JSON array, no other text, max 12 items.
+
+Types: identity (name/role), project (apps/products), tech (stack/tools), preference, url, path, config, outcome
+
+Format: [{"label":"snake_case_key","content":"value to remember","type":"type"}]
+
+Examples:
+- User says "my name is Sahil" → {"label":"user_name","content":"Sahil","type":"identity"}
+- User says "we have a telegram bot" → {"label":"project_telegram_bot","content":"user has a Telegram bot project","type":"project"}
+- User says "I use React and Next.js" → {"label":"tech_stack","content":"React, Next.js","type":"tech"}
+
+Conversation:
+User: ${task.slice(0, 600)}
+Agent: ${output.slice(0, 400)}`;
+
+    try {
+      const resp = await llm.complete(
+        [{ role: 'user', content: prompt }],
+        'You are a concise memory extraction system. Extract only factual, durable information. Skip generic statements.'
+      );
+
+      const jsonMatch = resp.content.match(/\[[\s\S]*?\]/);
+      if (!jsonMatch) return;
+
+      const entities = JSON.parse(jsonMatch[0]) as Array<{ label: string; content: string; type: string }>;
+      if (!Array.isArray(entities) || entities.length === 0) return;
+
+      let wrote = 0;
+      for (const e of entities.slice(0, 12)) {
+        if (!e.label?.trim() || !e.content?.trim()) continue;
+        const nodeId = `memory:${e.label.toLowerCase().replace(/[^a-z0-9_]/g, '_')}`;
+        try {
+          const existing = this.graph.getNode(nodeId);
+          if (existing) {
+            this.graph.updateNode(nodeId, {
+              label: e.label,
+              metadata: { ...existing.metadata, content: e.content, type: e.type ?? 'note', updated_at: new Date().toISOString() },
+            });
+          } else {
+            this.graph.addNode(createNode({
+              id: nodeId,
+              graph_id: 'root',
+              label: e.label,
+              type: NodeType.CONTEXT,
+              metadata: { content: e.content, type: e.type ?? 'note', saved_at: new Date().toISOString() },
+            }));
+          }
+          wrote++;
+        } catch {}
+      }
+
+      if (wrote > 0) {
+        console.log(`[0agent] Memory: extracted ${wrote} facts from session`);
+        this.onMemoryWritten?.();
+      }
+    } catch {
+      // Non-fatal — entity extraction never blocks session completion
+    }
   }
 
   /**

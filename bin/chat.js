@@ -7,7 +7,7 @@
  * /model to switch. /key to add provider keys. Never forgets previous keys.
  */
 
-import { createInterface, emitKeypressEvents, moveCursor, clearLine } from 'node:readline';
+import { createInterface, emitKeypressEvents, moveCursor, clearLine as rlClearLine } from 'node:readline';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -31,6 +31,7 @@ const SLASH_COMMANDS = [
   { cmd: '/security-audit',desc: 'Security audit — find vulnerabilities'           },
   { cmd: '/design-review', desc: 'Design review — architecture and patterns'       },
   // Built-ins
+  { cmd: '/telegram',      desc: 'Connect Telegram bot — forward messages to 0agent'},
   { cmd: '/model',         desc: 'Show or switch the LLM model'                   },
   { cmd: '/key',           desc: 'Update a stored API key'                         },
   { cmd: '/status',        desc: 'Daemon health, graph stats, active sessions'     },
@@ -754,6 +755,33 @@ async function handleCommand(input) {
       break;
     }
 
+    // /telegram — configure Telegram bot token
+    case '/telegram': {
+      if (!cfg) { console.log(fmt(C.red, '  No config found. Run: 0agent init')); break; }
+      const existingToken = cfg?.telegram?.token;
+      if (existingToken) {
+        console.log(`\n  Telegram bot: ${fmt(C.green, '✓ configured')}`);
+        console.log(`  Token: ${existingToken.slice(0, 10)}••••`);
+        console.log(`  ${fmt(C.dim, 'To update: /telegram <new-token>\n')}`);
+      }
+      const token = parts[1];
+      if (!token) {
+        if (!existingToken) {
+          console.log('\n  Connect your Telegram bot to 0agent:\n');
+          console.log(`  1. Create a bot: ${fmt(C.cyan, 'https://t.me/BotFather')} → /newbot`);
+          console.log(`  2. Copy the token and run: ${fmt(C.cyan, '/telegram <token>')}`);
+          console.log(`  3. Restart daemon: ${fmt(C.dim, '0agent stop && 0agent start')}\n`);
+        }
+        break;
+      }
+      if (!cfg.telegram) cfg.telegram = {};
+      cfg.telegram.token = token;
+      saveConfig(cfg);
+      console.log(`  ${fmt(C.green, '✓')} Telegram token saved`);
+      console.log(`  ${fmt(C.dim, 'Restart daemon for changes to take effect: 0agent stop && 0agent start\n')}`);
+      break;
+    }
+
     case '/skills': {
       try {
         const skills = await fetch(`${BASE_URL}/api/skills`).then(r => r.json());
@@ -831,7 +859,7 @@ function _drawMenu(filter) {
   if (existingLines > 0) {
     moveCursor(process.stdout, 0, existingLines);
     for (let i = 0; i < existingLines; i++) {
-      clearLine(process.stdout, 0);
+      rlClearLine(process.stdout, 0);
       if (i < existingLines - 1) moveCursor(process.stdout, 0, -1);
     }
     moveCursor(process.stdout, 0, -(existingLines - 1));
@@ -859,7 +887,7 @@ function _clearMenu() {
   _menuLines = 0;
   moveCursor(process.stdout, 0, n);
   for (let i = 0; i < n; i++) {
-    clearLine(process.stdout, 0);
+    rlClearLine(process.stdout, 0);
     moveCursor(process.stdout, 0, -1);
   }
   moveCursor(process.stdout, 0, 1); // back to prompt line
