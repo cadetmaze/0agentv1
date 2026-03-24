@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>0agent — Knowledge Graph</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d0d; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; }
+
+  #graph { width: 100vw; height: 100vh; }
+
+  /* Top bar */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; background: rgba(13,13,13,0.85);
+    border-bottom: 1px solid #222; backdrop-filter: blur(8px);
+  }
+  #topbar h1 { font-size: 15px; font-weight: 600; color: #7aa2f7; letter-spacing: -0.3px; }
+  #topbar .stats { font-size: 12px; color: #555; }
+  #topbar .ws-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #555;
+    transition: background 0.3s;
+  }
+  #topbar .ws-dot.live { background: #9ece6a; box-shadow: 0 0 6px #9ece6a88; }
+  #topbar .spacer { flex: 1; }
+  #topbar input {
+    background: #1a1a1a; border: 1px solid #333; color: #e0e0e0;
+    padding: 5px 10px; border-radius: 6px; font-size: 12px; width: 200px;
+    outline: none;
+  }
+  #topbar input:focus { border-color: #7aa2f7; }
+  #topbar select {
+    background: #1a1a1a; border: 1px solid #333; color: #e0e0e0;
+    padding: 5px 8px; border-radius: 6px; font-size: 12px; outline: none;
+    cursor: pointer;
+  }
+
+  /* Side panel */
+  #panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 320px; z-index: 90;
+    background: rgba(13,13,13,0.95); border-left: 1px solid #222;
+    transform: translateX(100%); transition: transform 0.25s ease;
+    overflow-y: auto; padding: 56px 0 16px;
+    backdrop-filter: blur(12px);
+  }
+  #panel.open { transform: translateX(0); }
+  #panel-close {
+    position: absolute; top: 44px; right: 12px;
+    background: none; border: none; color: #555; cursor: pointer;
+    font-size: 18px; line-height: 1;
+  }
+  #panel-close:hover { color: #e0e0e0; }
+  .panel-section { padding: 12px 16px; border-bottom: 1px solid #1a1a1a; }
+  .panel-section:last-child { border-bottom: none; }
+  .panel-label { font-size: 10px; font-weight: 600; text-transform: uppercase;
+                 letter-spacing: 0.8px; color: #555; margin-bottom: 6px; }
+  .panel-value { font-size: 13px; color: #e0e0e0; word-break: break-word; }
+  .panel-badge {
+    display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 8px;
+    border-radius: 10px; margin-right: 4px; margin-bottom: 4px;
+  }
+  .edge-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 0; border-bottom: 1px solid #111; font-size: 12px;
+  }
+  .edge-row:last-child { border-bottom: none; }
+  .edge-label { color: #8080a0; flex: 1; }
+  .edge-target { color: #7aa2f7; cursor: pointer; }
+  .edge-target:hover { text-decoration: underline; }
+  .weight-bar {
+    width: 40px; height: 4px; border-radius: 2px; background: #222;
+    position: relative; overflow: hidden;
+  }
+  .weight-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+  .personality-line { font-size: 12px; color: #aaa; margin-bottom: 4px; line-height: 1.5; }
+
+  /* Tooltip */
+  #tooltip {
+    position: fixed; z-index: 200; pointer-events: none;
+    background: rgba(13,13,13,0.95); border: 1px solid #333;
+    border-radius: 8px; padding: 8px 12px; font-size: 12px;
+    max-width: 220px; display: none;
+  }
+  #tooltip .tip-label { font-weight: 600; color: #e0e0e0; margin-bottom: 3px; }
+  #tooltip .tip-type { font-size: 10px; color: #555; text-transform: uppercase; }
+  #tooltip .tip-weight { font-size: 11px; color: #9ece6a; margin-top: 3px; }
+
+  /* Legend */
+  #legend {
+    position: fixed; bottom: 16px; left: 16px; z-index: 100;
+    background: rgba(13,13,13,0.85); border: 1px solid #222;
+    border-radius: 8px; padding: 10px 14px; font-size: 11px;
+    backdrop-filter: blur(8px);
+  }
+  #legend .legend-title { font-size: 10px; font-weight: 600; text-transform: uppercase;
+                          letter-spacing: 0.6px; color: #555; margin-bottom: 6px; }
+  .legend-item { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; color: #aaa; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  /* Weight change flash */
+  @keyframes flash { 0%,100%{opacity:1} 50%{opacity:0.3} }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <span class="ws-dot" id="wsdot"></span>
+  <h1>0agent</h1>
+  <span class="stats" id="stats">loading…</span>
+  <span class="spacer"></span>
+  <input type="text" id="search" placeholder="Search nodes…" />
+  <select id="filter">
+    <option value="all">All types</option>
+    <option value="entity">Entity</option>
+    <option value="context">Context</option>
+    <option value="strategy">Strategy</option>
+    <option value="plan">Plan</option>
+    <option value="step">Step</option>
+    <option value="signal">Signal</option>
+    <option value="outcome">Outcome</option>
+    <option value="hypothesis">Hypothesis</option>
+  </select>
+</div>
+
+<div id="graph"></div>
+
+<div id="panel">
+  <button id="panel-close">✕</button>
+</div>
+
+<div id="tooltip"></div>
+
+<div id="legend">
+  <div class="legend-title">Node types</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#7aa2f7"></span>Entity</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#9ece6a"></span>Context</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#e0af68"></span>Strategy</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#bb9af7"></span>Plan</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#f7768e"></span>Step</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#2ac3de"></span>Signal</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#1abc9c"></span>Outcome</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#ff9e64"></span>Hypothesis</div>
+</div>
+
+<!-- 3D Force Graph (WebGL) — same engine Obsidian uses -->
+<script src="https://unpkg.com/3d-force-graph@1.73.2/dist/3d-force-graph.min.js"></script>
+
+<script>
+const NODE_COLORS = {
+  entity:     '#7aa2f7',
+  context:    '#9ece6a',
+  strategy:   '#e0af68',
+  plan:       '#bb9af7',
+  step:       '#f7768e',
+  signal:     '#2ac3de',
+  outcome:    '#1abc9c',
+  tool:       '#73daca',
+  constraint: '#565f89',
+  hypothesis: '#ff9e64',
+};
+const DEFAULT_COLOR = '#565f89';
+
+// Graph state
+let graphData = { nodes: [], links: [] };
+let nodeMap = new Map();    // id → node
+let edgeMap = new Map();    // id → edge
+let selectedNode = null;
+let filterType = 'all';
+let searchQuery = '';
+
+// ─── Init 3D graph ─────────────────────────────────────────────────────────
+const Graph = ForceGraph3D()(document.getElementById('graph'))
+  .backgroundColor('#0d0d0d')
+  .nodeId('id')
+  .nodeLabel(n => `${n.label} (${n.type})`)
+  .nodeColor(n => {
+    const c = NODE_COLORS[n.type] || DEFAULT_COLOR;
+    if (searchQuery && !n.label.toLowerCase().includes(searchQuery)) return '#222';
+    if (filterType !== 'all' && n.type !== filterType) return '#1a1a1a';
+    if (n._flash) return '#ffffff';
+    return c;
+  })
+  .nodeVal(n => Math.max(1, Math.log2((n.visit_count || 1) + 1) * 3))
+  .nodeOpacity(0.9)
+  .linkColor(e => {
+    const w = e.weight ?? 0.5;
+    if (w >= 0.7) return '#9ece6a88';
+    if (w >= 0.4) return '#e0af6888';
+    return '#f7768e88';
+  })
+  .linkWidth(e => Math.max(0.3, (e.weight ?? 0.5) * 3))
+  .linkDirectionalArrowLength(4)
+  .linkDirectionalArrowRelPos(1)
+  .linkDirectionalParticles(e => e.weight > 0.7 ? 2 : 0)
+  .linkDirectionalParticleSpeed(0.006)
+  .linkDirectionalParticleColor(e => NODE_COLORS[e._toType] || '#7aa2f788')
+  .onNodeClick(node => showPanel(node))
+  .onNodeHover(node => showTooltip(node))
+  .onBackgroundClick(() => closePanel());
+
+// Responsive resize
+window.addEventListener('resize', () => {
+  Graph.width(window.innerWidth).height(window.innerHeight);
+});
+Graph.width(window.innerWidth).height(window.innerHeight);
+
+// ─── Data loading ───────────────────────────────────────────────────────────
+async function loadGraph() {
+  try {
+    const [nodesRes, edgesRes] = await Promise.all([
+      fetch('/api/graph/nodes?limit=500'),
+      fetch('/api/graph/edges?limit=2000'),
+    ]);
+    const nodesData = await nodesRes.json();
+    const edgesData = await edgesRes.json();
+
+    const nodes = (Array.isArray(nodesData) ? nodesData : nodesData.nodes ?? []);
+    const edges = (Array.isArray(edgesData) ? edgesData : edgesData.edges ?? []);
+
+    nodeMap.clear();
+    edgeMap.clear();
+
+    for (const n of nodes) nodeMap.set(n.id, n);
+
+    const links = edges
+      .filter(e => nodeMap.has(e.from_node) && nodeMap.has(e.to_node))
+      .map(e => ({
+        ...e,
+        source: e.from_node,
+        target: e.to_node,
+        _toType: nodeMap.get(e.to_node)?.type,
+      }));
+
+    for (const e of links) edgeMap.set(e.id, e);
+
+    graphData = { nodes, links };
+    Graph.graphData(graphData);
+    updateStats();
+  } catch (e) {
+    console.error('Failed to load graph:', e);
+  }
+}
+
+function updateStats() {
+  document.getElementById('stats').textContent =
+    `${graphData.nodes.length} nodes · ${graphData.links.length} edges`;
+}
+
+// ─── WebSocket live updates ─────────────────────────────────────────────────
+const wsDot = document.getElementById('wsdot');
+let ws;
+
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    wsDot.classList.add('live');
+    ws.send(JSON.stringify({ type: 'subscribe', topics: ['graph', 'sessions', 'stats'] }));
+  };
+  ws.onclose = () => {
+    wsDot.classList.remove('live');
+    setTimeout(connectWS, 3000);
+  };
+  ws.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    handleEvent(event);
+  };
+}
+
+function handleEvent(event) {
+  switch (event.type) {
+    case 'graph.weight_updated': {
+      const link = edgeMap.get(event.edge_id);
+      if (link) {
+        link.weight = event.new_weight;
+        // Flash the connected nodes
+        const srcNode = nodeMap.get(link.from_node || link.source?.id);
+        if (srcNode) { srcNode._flash = true; setTimeout(() => { srcNode._flash = false; Graph.refresh(); }, 600); }
+        Graph.refresh();
+      }
+      break;
+    }
+    case 'daemon.stats':
+      // Reload graph periodically when stats show growth
+      if (event.graph_nodes > graphData.nodes.length) loadGraph();
+      break;
+    case 'session.completed':
+      // Small delay then reload to pick up new nodes
+      setTimeout(loadGraph, 800);
+      break;
+  }
+}
+
+// ─── Side panel ─────────────────────────────────────────────────────────────
+function showPanel(node) {
+  if (!node) return;
+  selectedNode = node;
+  const panel = document.getElementById('panel');
+  panel.classList.add('open');
+
+  // Build content
+  const edges = graphData.links.filter(
+    l => (l.source?.id ?? l.source) === node.id || (l.target?.id ?? l.target) === node.id
+  );
+
+  const color = NODE_COLORS[node.type] || DEFAULT_COLOR;
+
+  let html = `
+    <div class="panel-section">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="width:10px;height:10px;border-radius:50%;background:${color};flex-shrink:0"></span>
+        <span style="font-size:15px;font-weight:600">${escHtml(node.label)}</span>
+      </div>
+      <span class="panel-badge" style="background:${color}22;color:${color}">${node.type}</span>
+      ${node.metadata?.is_skill ? '<span class="panel-badge" style="background:#7aa2f722;color:#7aa2f7">skill</span>' : ''}
+    </div>
+    <div class="panel-section">
+      <div class="panel-label">Stats</div>
+      <div class="panel-value">Visits: ${node.visit_count ?? 0}</div>
+      <div class="panel-value" style="color:#555;font-size:11px;margin-top:3px">
+        Last seen: ${node.last_seen ? new Date(node.last_seen).toLocaleString() : '—'}
+      </div>
+    </div>`;
+
+  // Personality profile (for entity nodes)
+  if (node.type === 'entity') {
+    const personalityEdge = graphData.links.find(
+      l => (l.source?.id ?? l.source) === node.id && nodeMap.get(l.target?.id ?? l.target)?.label === '__personality_profile__'
+    );
+    if (personalityEdge) {
+      const profileNode = nodeMap.get(personalityEdge.target?.id ?? personalityEdge.target);
+      if (profileNode?.content?.[0]?.data) {
+        try {
+          const p = JSON.parse(profileNode.content[0].data);
+          html += `
+            <div class="panel-section">
+              <div class="panel-label">Personality (${p.interaction_count} interactions)</div>
+              ${p.communication_style ? `<div class="personality-line"><b>Style:</b> ${escHtml(p.communication_style)}</div>` : ''}
+              ${p.working_context ? `<div class="personality-line"><b>Context:</b> ${escHtml(p.working_context)}</div>` : ''}
+              ${p.timezone !== 'UTC' && p.timezone ? `<div class="personality-line"><b>TZ:</b> ${escHtml(p.timezone)}</div>` : ''}
+              ${p.response_preferences?.length ? `<div class="personality-line"><b>Prefs:</b> ${p.response_preferences.map(escHtml).join(', ')}</div>` : ''}
+            </div>`;
+        } catch {}
+      }
+    }
+  }
+
+  // Edges
+  if (edges.length > 0) {
+    html += `<div class="panel-section"><div class="panel-label">Connections (${edges.length})</div>`;
+    for (const edge of edges.slice(0, 20)) {
+      const srcId = edge.source?.id ?? edge.source;
+      const tgtId = edge.target?.id ?? edge.target;
+      const isOut = srcId === node.id;
+      const otherId = isOut ? tgtId : srcId;
+      const other = nodeMap.get(otherId);
+      const w = edge.weight ?? 0.5;
+      const wColor = w >= 0.7 ? '#9ece6a' : w >= 0.4 ? '#e0af68' : '#f7768e';
+      html += `
+        <div class="edge-row">
+          <span class="edge-label">${isOut ? '→' : '←'} ${escHtml(edge.type)}</span>
+          <span class="edge-target" onclick="focusNode('${otherId}')">${escHtml(other?.label ?? otherId)}</span>
+          <div style="display:flex;align-items:center;gap:4px;margin-left:8px">
+            <div class="weight-bar"><div class="weight-fill" style="width:${(w*100).toFixed(0)}%;background:${wColor}"></div></div>
+            <span style="font-size:10px;color:${wColor};min-width:28px">${w.toFixed(2)}</span>
+          </div>
+        </div>`;
+    }
+    if (edges.length > 20) html += `<div style="font-size:11px;color:#555;margin-top:6px">+${edges.length - 20} more</div>`;
+    html += '</div>';
+  }
+
+  // Node metadata
+  if (node.metadata && Object.keys(node.metadata).length > 0) {
+    const meta = Object.entries(node.metadata)
+      .filter(([k]) => !['is_personality_profile'].includes(k))
+      .slice(0, 8);
+    if (meta.length > 0) {
+      html += `<div class="panel-section"><div class="panel-label">Metadata</div>`;
+      for (const [k, v] of meta) {
+        html += `<div style="font-size:11px;color:#555;margin-bottom:2px"><span style="color:#7aa2f7">${escHtml(k)}</span>: ${escHtml(String(v))}</div>`;
+      }
+      html += '</div>';
+    }
+  }
+
+  panel.innerHTML = `<button id="panel-close" onclick="closePanel()">✕</button>${html}`;
+}
+
+function closePanel() {
+  document.getElementById('panel').classList.remove('open');
+  selectedNode = null;
+}
+
+function focusNode(id) {
+  const node = nodeMap.get(id);
+  if (!node) return;
+  Graph.centerAt(node.x, node.y, node.z, 600);
+  Graph.zoom(2, 600);
+  setTimeout(() => showPanel(node), 650);
+}
+window.focusNode = focusNode;
+
+// ─── Tooltip ────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+
+function showTooltip(node) {
+  if (!node) { tooltip.style.display = 'none'; return; }
+  const edges = graphData.links.filter(
+    l => (l.source?.id ?? l.source) === node.id || (l.target?.id ?? l.target) === node.id
+  );
+  const avgWeight = edges.length
+    ? (edges.reduce((s, e) => s + (e.weight ?? 0.5), 0) / edges.length).toFixed(2)
+    : '—';
+  tooltip.innerHTML = `
+    <div class="tip-label">${escHtml(node.label)}</div>
+    <div class="tip-type">${node.type}</div>
+    <div class="tip-weight">${edges.length} connections · avg weight ${avgWeight}</div>`;
+  tooltip.style.display = 'block';
+}
+
+document.addEventListener('mousemove', e => {
+  tooltip.style.left = (e.clientX + 14) + 'px';
+  tooltip.style.top  = (e.clientY - 10) + 'px';
+});
+
+// ─── Search & filter ─────────────────────────────────────────────────────────
+document.getElementById('search').addEventListener('input', e => {
+  searchQuery = e.target.value.toLowerCase();
+  Graph.refresh();
+});
+
+document.getElementById('filter').addEventListener('change', e => {
+  filterType = e.target.value;
+  Graph.refresh();
+});
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+loadGraph();
+connectWS();
+// Reload every 30s to catch any missed updates
+setInterval(loadGraph, 30_000);
+</script>
+</body>
+</html>

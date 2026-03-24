@@ -5,7 +5,24 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import type { Server } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { KnowledgeGraph, TraceStore } from '@0agent/core';
+
+// In development: same dir as source. In production bundle: ../dist/graph.html
+function findGraphHtml(): string {
+  const candidates = [
+    resolve(dirname(fileURLToPath(import.meta.url)), 'graph.html'),          // dev (src/)
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'graph.html'),    // bundled (dist/../)
+    resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'graph.html'),
+  ];
+  for (const p of candidates) {
+    try { readFileSync(p); return p; } catch {}
+  }
+  return candidates[0];
+}
+const GRAPH_HTML_PATH = findGraphHtml();
 
 import { healthRoutes, type DaemonStatus } from './routes/health.js';
 import { sessionRoutes } from './routes/sessions.js';
@@ -45,10 +62,17 @@ export class HTTPServer {
     this.app.route('/api/subagents', subagentRoutes());
     this.app.route('/api/skills', skillRoutes({ skillRegistry: deps.skillRegistry }));
 
-    // Root endpoint
-    this.app.get('/', (c) => {
-      return c.json({ name: '0agent-daemon', version: '2.0.0' });
-    });
+    // Serve 3D knowledge graph at root and /graph
+    const serveGraph = (c: any) => {
+      try {
+        const html = readFileSync(GRAPH_HTML_PATH, 'utf8');
+        return c.html(html);
+      } catch {
+        return c.html('<p>Graph UI not found. Run: pnpm build</p>');
+      }
+    };
+    this.app.get('/', serveGraph);
+    this.app.get('/graph', serveGraph);
   }
 
   start(): Promise<void> {

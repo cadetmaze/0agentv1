@@ -6,7 +6,7 @@
 import { build } from 'esbuild';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, copyFileSync } from 'node:fs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = resolve(root, 'dist');
@@ -44,4 +44,10 @@ await build({
   target: 'node20',
 });
 
-console.log('✓ Bundled → dist/daemon.mjs');
+// Copy static assets
+copyFileSync(
+  resolve(root, 'packages/daemon/src/graph.html'),
+  resolve(outDir, 'graph.html')
+);
+
+console.log('✓ Bundled → dist/daemon.mjs + dist/graph.html');
