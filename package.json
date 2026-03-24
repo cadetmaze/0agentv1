@@ -6,8 +6,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "0agent": "./bin/0agent.js",
-    "0agent-chat": "./bin/chat.js"
+    "0agent": "bin/0agent.js",
+    "0agent-chat": "bin/chat.js"
   },
   "files": [
     "bin/",
@@ -53,7 +53,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/cadetmaze/0agentv1"
+    "url": "git+https://github.com/cadetmaze/0agentv1.git"
   },
   "homepage": "https://github.com/cadetmaze/0agentv1#readme",
   "packageManager": "pnpm@9.12.0"
