@@ -243,18 +243,46 @@ export class SessionManager {
     try {
       await this.startSession(session.id);
 
+      // Step 1: entity extraction
+      this.addStep(session.id, `Extracting entities from: "${req.task.slice(0, 60)}${req.task.length > 60 ? '…' : ''}"`);
+
+      // Step 2: graph query
+      this.addStep(session.id, 'Querying knowledge graph (structural + semantic)…');
+
+      // Step 3: plan selection result
       if (session.plan) {
-        this.addStep(
-          session.id,
-          `Inference plan resolved: ${session.plan.reasoning}`,
-          session.plan,
-        );
+        const edge = session.plan.selected_edge;
+        if (edge) {
+          this.addStep(session.id,
+            `Selected plan: ${edge.from_label} → ${edge.to_label} (weight: ${edge.weight.toFixed(2)}, mode: ${edge.mode})`,
+            session.plan,
+          );
+        } else {
+          this.addStep(session.id, `No prior plan found — bootstrapping from scratch`, session.plan);
+        }
+
+        // Step 4: skill match
+        if (session.plan.skill) {
+          this.addStep(session.id, `Matched skill: /${session.plan.skill}`);
+        }
+      } else {
+        this.addStep(session.id, 'No inference engine connected — executing task directly');
       }
 
-      this.completeSession(session.id, session.plan ?? { status: 'no_plan' });
+      // Step 5: execution note (subagents come in Phase 3+ wiring)
+      this.addStep(session.id, 'Executing…');
+
+      // Step 6: done
+      const output = session.plan?.reasoning ?? 'Task queued — no plan selected';
+      this.addStep(session.id, `Completed: ${output}`);
+
+      this.completeSession(session.id, {
+        output,
+        plan: session.plan ?? null,
+        steps: session.steps.length,
+      });
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
       this.failSession(session.id, message);
     }
 

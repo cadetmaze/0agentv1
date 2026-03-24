@@ -115,27 +115,68 @@ async function runInit() {
   mkdirSync(resolve(AGENT_DIR, 'skills', 'builtin'), { recursive: true });
   mkdirSync(resolve(AGENT_DIR, 'skills', 'custom'), { recursive: true });
 
-  console.log('  Step 1 of 4: LLM Provider\n');
+  console.log('  Step 1 of 5: LLM Provider\n');
   const provider = await choose('  Which LLM provider?', [
     'Anthropic (Claude)  ← recommended',
     'OpenAI (GPT-4o)',
+    'xAI (Grok)',
+    'Google (Gemini)',
     'Ollama (local, free)',
   ], 0);
-  const providerKey = ['anthropic', 'openai', 'ollama'][provider];
+  const providerKey = ['anthropic', 'openai', 'xai', 'gemini', 'ollama'][provider];
+
+  // Model selection per provider
+  const MODELS = {
+    anthropic: [
+      'claude-sonnet-4-6  ← recommended (fast + smart)',
+      'claude-opus-4-6    (most capable, slower)',
+      'claude-haiku-4-5   (fastest, cheapest)',
+    ],
+    openai: [
+      'gpt-4o             ← recommended',
+      'gpt-4o-mini        (faster, cheaper)',
+      'o3-mini            (reasoning)',
+    ],
+    xai: [
+      'grok-3             ← recommended',
+      'grok-3-mini',
+    ],
+    gemini: [
+      'gemini-2.0-flash   ← recommended',
+      'gemini-2.0-pro',
+    ],
+    ollama: [
+      'llama3.1           ← recommended',
+      'mistral',
+      'codellama',
+    ],
+  };
+
+  let model = '';
+  if (MODELS[providerKey]) {
+    console.log();
+    const modelIdx = await choose('  Which model?', MODELS[providerKey], 0);
+    model = MODELS[providerKey][modelIdx].split(/\s+/)[0];
+  }
 
   let apiKey = '';
   if (providerKey !== 'ollama') {
     apiKey = await ask(`\n  API Key: `);
     if (!apiKey.trim()) {
       console.log('  ⚠️  No API key provided. You can set it later in ~/.0agent/config.yaml');
+    } else {
+      // Validate key format
+      const keyPrefixes = { anthropic: 'sk-ant-', openai: 'sk-', xai: 'xai-', gemini: 'AI' };
+      const expectedPrefix = keyPrefixes[providerKey];
+      if (expectedPrefix && !apiKey.startsWith(expectedPrefix)) {
+        console.log(`  ⚠️  Key doesn't look like a ${providerKey} key (expected: ${expectedPrefix}...)`);
+      } else {
+        console.log('  ✓ API key format looks valid');
+      }
     }
   }
 
-  const model = providerKey === 'anthropic' ? 'claude-sonnet-4-6'
-    : providerKey === 'openai'    ? 'gpt-4o'
-    : 'llama3';
-
-  console.log('\n  Step 2 of 4: Embedding model\n');
+  console.log('\n  Step 2 of 5: Embedding model\n');
   const embedding = await choose('  Embedding backend?', [
     'Local via Ollama (nomic-embed-text)  ← free, private',
     'OpenAI text-embedding-3-small (cloud)',
@@ -143,18 +184,27 @@ async function runInit() {
   ], 0);
   const embeddingProvider = ['nomic-ollama', 'openai', 'none'][embedding];
 
-  console.log('\n  Step 3 of 4: Sandbox backend\n');
+  console.log('\n  Step 3 of 5: Sandbox backend\n');
   const sandboxes = detectSandboxes();
   console.log(`  Detected: ${sandboxes.join(', ') || 'process (fallback)'}`);
   const sandboxChoice = sandboxes[0] ?? 'process';
   console.log(`  Using: ${sandboxChoice}`);
 
-  console.log('\n  Step 4 of 4: Seed graph\n');
+  console.log('\n  Step 4 of 5: Seed graph\n');
   const seed = await choose('  Start with a seed graph?', [
     'software-engineering (skills + sprint workflow)  ← recommended',
     'scratch (empty graph)',
   ], 0);
   const seedName = seed === 0 ? 'software-engineering' : null;
+
+  // Step 5: confirm
+  console.log('\n  Step 5 of 5: Ready\n');
+  console.log(`  Provider:  ${providerKey}`);
+  console.log(`  Model:     ${model}`);
+  console.log(`  API Key:   ${apiKey ? apiKey.slice(0, 8) + '••••••••' : '(not set)'}`);
+  console.log(`  Sandbox:   ${sandboxChoice}`);
+  console.log(`  Seed:      ${seedName ?? 'scratch'}`);
+  console.log();
 
   // Write config
   const dbPath    = resolve(AGENT_DIR, 'graph.db');
@@ -168,7 +218,7 @@ version: "1"
 llm_providers:
   - provider: ${providerKey}
     model: ${model}
-    api_key: ${apiKey || '""'}
+    api_key: "${apiKey || ''}"
     is_default: true
 
 embedding:
@@ -377,14 +427,16 @@ async function streamSession(sessionId) {
 
         switch (event.type) {
           case 'session.step':
-            console.log(`  → ${event.step}`);
+            console.log(`  › ${event.step}`);
             break;
-          case 'session.completed':
-            console.log('\n  ✓ Completed\n');
-            if (event.result?.output) console.log(`  ${event.result.output}\n`);
+          case 'session.completed': {
+            console.log('\n  ✓ Done\n');
+            const out = event.result?.output ?? event.result;
+            if (out && typeof out === 'string') console.log(`  ${out}\n`);
             ws.close();
             resolve();
             break;
+          }
           case 'session.failed':
             console.log(`\n  ✗ Failed: ${event.error}\n`);
             ws.close();
@@ -406,21 +458,31 @@ async function streamSession(sessionId) {
 }
 
 async function pollSession(sessionId) {
+  let lastStepCount = 0;
   for (let i = 0; i < 300; i++) {
-    await sleep(1000);
+    await sleep(600);
     const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`);
     const s = await res.json();
+
+    // Print any new steps since last poll
+    const steps = s.steps ?? [];
+    for (let j = lastStepCount; j < steps.length; j++) {
+      console.log(`  › ${steps[j].description}`);
+    }
+    lastStepCount = steps.length;
+
     if (s.status === 'completed') {
-      console.log('\n  ✓ Completed\n');
-      if (s.result?.output) console.log(`  ${s.result.output}\n`);
+      console.log('\n  ✓ Done\n');
+      const out = s.result?.output ?? s.result;
+      if (out && typeof out === 'string') console.log(`  ${out}\n`);
       return;
     }
     if (s.status === 'failed') {
       console.log(`\n  ✗ Failed: ${s.error}\n`);
       return;
     }
-    process.stdout.write('.');
   }
+  console.log('\n  Timed out waiting for session.\n');
 }
 
 // ─── Chat REPL ───────────────────────────────────────────────────────────
