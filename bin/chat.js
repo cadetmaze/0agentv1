@@ -57,6 +57,55 @@ const C = {
 const fmt = (color, text) => `${color}${text}${C.reset}`;
 const clearLine = () => process.stdout.write('\r\x1b[2K');
 
+// ─── LLM ping — direct 1-token call, bypasses daemon, instant ────────────────
+async function pingLLM(provider) {
+  const key   = provider.api_key ?? '';
+  const model = provider.model;
+  const sig   = AbortSignal.timeout(8000);
+
+  try {
+    if (provider.provider === 'anthropic') {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST', signal: sig,
+        headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      const d = await r.json();
+      if (!r.ok) return { ok: false, error: d.error?.message ?? `HTTP ${r.status}` };
+      return { ok: true, model: d.model };
+    }
+
+    if (['openai','xai','gemini'].includes(provider.provider)) {
+      const base = provider.provider === 'xai' ? 'https://api.x.ai/v1'
+        : provider.provider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta/openai'
+        : 'https://api.openai.com/v1';
+      const r = await fetch(`${base}/chat/completions`, {
+        method: 'POST', signal: sig,
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      const d = await r.json();
+      if (!r.ok) return { ok: false, error: d.error?.message ?? `HTTP ${r.status}` };
+      return { ok: true, model: d.model };
+    }
+
+    if (provider.provider === 'ollama') {
+      const base = provider.base_url ?? 'http://localhost:11434';
+      const r = await fetch(`${base}/api/generate`, {
+        method: 'POST', signal: sig,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, prompt: 'hi', stream: false }),
+      });
+      if (!r.ok) return { ok: false, error: `Ollama HTTP ${r.status}` };
+      return { ok: true, model };
+    }
+
+    return { ok: true, model }; // unknown provider — skip check
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 // ─── Config management ────────────────────────────────────────────────────────
 function loadConfig() {
   if (!existsSync(CONFIG_PATH)) return null;
@@ -437,47 +486,26 @@ connectWS();
     else { console.log(`  ${fmt(C.red, '✗')} Daemon failed. Run: 0agent start`); rl.prompt(); return; }
   }
 
-  // Step 2: verify LLM is reachable with a quick "hello" check
+  // Step 2: lightweight direct API ping (1 token — fast, no daemon involved)
   const provider = getCurrentProvider(cfg);
-  if (provider?.api_key?.trim() || provider?.provider === 'ollama') {
-    const llmSpin = new Spinner(`Connecting to ${provider.provider}/${provider.model}`);
+  if (!provider?.api_key?.trim() && provider?.provider !== 'ollama') {
+    console.log(`  ${fmt(C.yellow, '⚠')} No API key. Use: ${fmt(C.cyan, '/key ' + (provider?.provider ?? 'anthropic') + ' <key>')}\n`);
+  } else {
+    const llmSpin = new Spinner(`Checking ${provider.provider}/${provider.model}`);
     llmSpin.start();
     try {
-      // Ask the daemon to run a minimal LLM ping via the session API
-      const res = await fetch(`${BASE_URL}/api/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: 'Reply with exactly: ready', options: { max_steps: 1 } }),
-      });
-      const s = await res.json();
-      const sid = s.session_id ?? s.id;
-      // Poll briefly for completion
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        const check = await fetch(`${BASE_URL}/api/sessions/${sid}`).then(r => r.json()).catch(() => null);
-        if (check?.status === 'completed') {
-          llmSpin.stop();
-          const model = check.result?.model ?? provider.model;
-          console.log(`  ${fmt(C.green, '✓')} LLM connected — ${fmt(C.cyan, model)}\n`);
-          break;
-        }
-        if (check?.status === 'failed') {
-          llmSpin.stop();
-          console.log(`  ${fmt(C.red, '✗')} LLM error: ${check.error}`);
-          console.log(`  ${fmt(C.dim, 'Check your API key with: /key ' + provider.provider)}\n`);
-          break;
-        }
-      }
-      if (llmSpin.active) {
-        llmSpin.stop();
-        console.log(`  ${fmt(C.yellow, '⚠')} LLM check timed out — it may still work\n`);
-      }
-    } catch {
+      const result = await pingLLM(provider);
       llmSpin.stop();
-      console.log(`  ${fmt(C.yellow, '⚠')} Could not verify LLM connection\n`);
+      if (result.ok) {
+        console.log(`  ${fmt(C.green, '✓')} ${fmt(C.cyan, result.model ?? provider.model)} is ready\n`);
+      } else {
+        console.log(`  ${fmt(C.red, '✗')} LLM error: ${result.error}`);
+        console.log(`  ${fmt(C.dim, 'Fix with: /key ' + provider.provider + ' <new-key>')}\n`);
+      }
+    } catch (e) {
+      llmSpin.stop();
+      console.log(`  ${fmt(C.yellow, '⚠')} Could not reach ${provider.provider}: ${e.message}\n`);
     }
-  } else {
-    console.log(`  ${fmt(C.yellow, '⚠')} No API key set. Use: ${fmt(C.cyan, '/key ' + (provider?.provider ?? 'anthropic') + ' <your-key>')}\n`);
   }
 
   rl.prompt();
