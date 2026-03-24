@@ -361,8 +361,10 @@ async function runSkill(skillName, extraArgs) {
 async function streamSession(sessionId) {
   await requireDaemon();
 
+  const WS = await importWS();
+
   return new Promise((resolve) => {
-    const ws = new (await importWS())(`ws://localhost:4200/ws`);
+    const ws = new WS(`ws://localhost:4200/ws`);
 
     ws.on('open', () => {
       ws.send(JSON.stringify({ type: 'subscribe', topics: ['sessions'] }));
@@ -531,7 +533,7 @@ async function runImprove(improveArgs) {
 function showLogs(logArgs) {
   const n = parseInt(logArgs.find(a => a.match(/^\d+$/)) ?? '100', 10);
   if (!existsSync(LOG_PATH)) { console.log('  No logs yet. Run `0agent start` first.'); return; }
-  const { execSync } = await import('node:child_process');
+  // execSync already imported at top level via node:child_process
   execSync(`tail -${n} "${LOG_PATH}"`, { stdio: 'inherit' });
 }
 
