@@ -43,6 +43,7 @@ import { TeamManager } from './TeamManager.js';
 import { TeamSync } from './TeamSync.js';
 import { GitHubMemorySync } from './GitHubMemorySync.js';
 import { CodespaceManager } from './CodespaceManager.js';
+import { SchedulerManager } from './SchedulerManager.js';
 import type { DaemonStatus } from './routes/health.js';
 
 // ─── Types ───────────────────────────────────────────
@@ -68,6 +69,7 @@ export class ZeroAgentDaemon {
   private memorySyncTimer: ReturnType<typeof setInterval> | null = null;
   private proactiveSurfaceInstance: unknown = null;
   private codespaceManager: CodespaceManager | null = null;
+  private schedulerManager: SchedulerManager | null = null;
   private startedAt: number = 0;
   private pidFilePath: string;
 
@@ -208,6 +210,10 @@ export class ZeroAgentDaemon {
       // Collab-2 not yet built — skip silently
     }
 
+    // 6.8 — Scheduler: create after sessionManager (needs it to fire jobs)
+    this.schedulerManager = new SchedulerManager(this.adapter, this.sessionManager, this.eventBus);
+    this.schedulerManager.start();
+
     // 7. Create BackgroundWorkers, start them
     this.backgroundWorkers = new BackgroundWorkers({
       graph: this.graph,
@@ -237,6 +243,7 @@ export class ZeroAgentDaemon {
       getMemorySync: () => memSyncRef,
       proactiveSurface: proactiveSurface as any,
       getCodespaceManager: () => this.codespaceManager,
+      scheduler: this.schedulerManager,
       setupCodespace: async () => {
         if (!this.codespaceManager) return { started: false, error: 'GitHub memory not configured. Run: 0agent memory connect github' };
         try {
@@ -291,6 +298,8 @@ export class ZeroAgentDaemon {
     }
     if (this.memorySyncTimer) { clearInterval(this.memorySyncTimer); this.memorySyncTimer = null; }
     this.githubMemorySync = null;
+    this.schedulerManager?.stop();
+    this.schedulerManager = null;
     this.codespaceManager?.closeTunnel();
     this.codespaceManager = null;
 

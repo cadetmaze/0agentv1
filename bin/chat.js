@@ -189,6 +189,13 @@ function handleWsEvent(event) {
       lineBuffer += event.token;
       break;
     }
+    case 'schedule.fired': {
+      // Show when a scheduled job fires — even if user is idle
+      const ts = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+      process.stdout.write(`\n  ${fmt(C.magenta, '⏰')} [${ts}] Scheduled: ${fmt(C.bold, event.job_name)} — ${event.task}\n`);
+      if (!streaming) rl.prompt(true);
+      break;
+    }
     case 'session.completed': {
       spinner.stop();
       if (streaming) { process.stdout.write('\n'); streaming = false; }
@@ -380,6 +387,78 @@ async function handleCommand(input) {
     }
 
     // /skills
+    // /schedule — cron-like job scheduler
+    case '/schedule': {
+      const schedArgs = parts.slice(1);
+      const subCmd = schedArgs[0]?.toLowerCase() ?? 'list';
+
+      if (subCmd === 'list' || schedArgs.length === 0) {
+        const res = await fetch(`${BASE_URL}/api/schedule`).catch(() => null);
+        const jobs = res?.ok ? await res.json().catch(() => []) : [];
+        if (!Array.isArray(jobs) || jobs.length === 0) {
+          console.log('\n  No scheduled jobs. Add one:\n  ' +
+            fmt(C.dim, '/schedule add "run /retro" every Friday at 5pm') + '\n');
+        } else {
+          console.log('\n  Scheduled jobs:\n');
+          for (const j of jobs) {
+            const status = j.enabled ? fmt(C.green, '●') : fmt(C.dim, '○');
+            const next = j.next_run_human ?? 'unknown';
+            console.log(`  ${status} ${fmt(C.bold, j.id)}  ${j.name}`);
+            console.log(`     ${fmt(C.dim, j.schedule_human + ' · next: ' + next)}`);
+          }
+          console.log();
+        }
+      } else if (subCmd === 'add') {
+        // /schedule add "<task>" <schedule...>
+        // Parse: extract quoted task, rest is schedule
+        const rest = parts.slice(2).join(' ');
+        const quoted = rest.match(/^"([^"]+)"\s+(.+)$/) || rest.match(/^'([^']+)'\s+(.+)$/);
+        if (!quoted) {
+          console.log(`  ${fmt(C.dim, 'Usage: /schedule add "<task>" <schedule>')}`);
+          console.log(`  ${fmt(C.dim, 'Examples:')}`);
+          console.log(`  ${fmt(C.cyan, '  /schedule add "run /retro" every Friday at 5pm')}`);
+          console.log(`  ${fmt(C.cyan, '  /schedule add "run /review" every day at 9am')}`);
+          console.log(`  ${fmt(C.cyan, '  /schedule add "check the build" in 2 hours')}\n`);
+        } else {
+          const task = quoted[1];
+          const schedule = quoted[2];
+          const res = await fetch(`${BASE_URL}/api/schedule`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task, schedule }),
+          }).catch(() => null);
+          const data = res?.ok ? await res.json().catch(() => null) : null;
+          if (data?.id) {
+            console.log(`  ${fmt(C.green, '✓')} Scheduled: ${fmt(C.bold, data.name)}`);
+            console.log(`  ${fmt(C.dim, data.schedule_human + ' · next: ' + data.next_run_human)}\n`);
+          } else {
+            console.log(`  ${fmt(C.red, '✗')} ${data?.error ?? 'Failed to create schedule'}\n`);
+          }
+        }
+      } else if (subCmd === 'delete' || subCmd === 'remove') {
+        const id = schedArgs[1];
+        if (!id) { console.log('  Usage: /schedule delete <id>\n'); break; }
+        const res = await fetch(`${BASE_URL}/api/schedule/${id}`, { method: 'DELETE' }).catch(() => null);
+        const data = res?.ok ? await res.json().catch(() => null) : null;
+        console.log(data?.ok
+          ? `  ${fmt(C.green, '✓')} Deleted ${id}\n`
+          : `  ${fmt(C.red, '✗')} ${data?.error ?? 'Not found'}\n`);
+      } else if (subCmd === 'pause') {
+        const id = schedArgs[1];
+        if (!id) { console.log('  Usage: /schedule pause <id>\n'); break; }
+        await fetch(`${BASE_URL}/api/schedule/${id}/pause`, { method: 'POST' });
+        console.log(`  ${fmt(C.green, '✓')} Paused ${id}\n`);
+      } else if (subCmd === 'resume') {
+        const id = schedArgs[1];
+        if (!id) { console.log('  Usage: /schedule resume <id>\n'); break; }
+        await fetch(`${BASE_URL}/api/schedule/${id}/resume`, { method: 'POST' });
+        console.log(`  ${fmt(C.green, '✓')} Resumed ${id}\n`);
+      } else {
+        console.log('  Usage: /schedule list | add "<task>" <schedule> | delete <id> | pause <id> | resume <id>\n');
+      }
+      break;
+    }
+
     case '/skills': {
       try {
         const skills = await fetch(`${BASE_URL}/api/skills`).then(r => r.json());
@@ -442,6 +521,7 @@ const rl = createInterface({
   historySize: 100,
   completer: (line) => {
     const commands = ['/model', '/key', '/status', '/skills', '/graph', '/clear', '/help',
+      '/schedule', '/schedule list', '/schedule add',
       '/review', '/build', '/debug', '/qa', '/research', '/refactor', '/test-writer', '/retro'];
     const hits = commands.filter(c => c.startsWith(line));
     return [hits.length ? hits : commands, line];
@@ -569,7 +649,7 @@ rl.on('line', async (input) => {
   const line = input.trim();
   if (!line) { rl.prompt(); return; }
 
-  if (line.startsWith('/') || ['/model','/key','/status','/skills','/graph','/clear','/help'].some(c => line.startsWith(c))) {
+  if (line.startsWith('/') || ['/model','/key','/status','/skills','/graph','/clear','/help','/schedule'].some(c => line.startsWith(c))) {
     await handleCommand(line);
     rl.prompt();
   } else {

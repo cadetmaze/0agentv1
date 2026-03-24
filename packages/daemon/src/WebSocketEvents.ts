@@ -29,7 +29,11 @@ export type DaemonEvent =
   // ─── Collab-3: team sync ───────────────────────────────────────────────
   | { type: 'team.synced'; team_id: string; deltas_pushed: number; deltas_pulled: number }
   | { type: 'team.member_joined'; team_id: string; member_name: string }
-  | { type: 'team.member_left'; team_id: string; member_name: string };
+  | { type: 'team.member_left'; team_id: string; member_name: string }
+  // ─── Scheduler ────────────────────────────────────────────────────────────
+  | { type: 'schedule.fired'; job_id: string; job_name: string; task: string; run_count: number }
+  | { type: 'schedule.completed'; job_id: string; session_id: string }
+  | { type: 'schedule.error'; job_id: string; error: string };
 
 export type EventHandler = (event: DaemonEvent) => void;
 
