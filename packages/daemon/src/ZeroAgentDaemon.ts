@@ -15,7 +15,7 @@
  *  11. Register signal handlers
  */
 
-import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -45,6 +45,8 @@ import { GitHubMemorySync } from './GitHubMemorySync.js';
 import { CodespaceManager } from './CodespaceManager.js';
 import { SchedulerManager } from './SchedulerManager.js';
 import { RuntimeSelfHeal } from './RuntimeSelfHeal.js';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import type { DaemonStatus } from './routes/health.js';
 
 // ─── Types ───────────────────────────────────────────
@@ -171,6 +173,15 @@ export class ZeroAgentDaemon {
       console.log(`[0agent] Teams: ${teams.map(t => t.team_name).join(', ')}`);
     }
 
+    // Detect agent source root (for self-improvement context injection)
+    const _daemonFile = fileURLToPath(import.meta.url);
+    const _agentRoot = resolve(dirname(_daemonFile), '..');
+    let agentRoot: string | undefined;
+    try {
+      const _pkg = JSON.parse(readFileSync(resolve(_agentRoot, 'package.json'), 'utf8'));
+      if (_pkg.name === '0agent') agentRoot = _agentRoot;
+    } catch {}
+
     // 6. Create SessionManager
     this.eventBus = new WebSocketEventBus();
     this.sessionManager = new SessionManager({
@@ -181,7 +192,8 @@ export class ZeroAgentDaemon {
       cwd,
       identity: identity ?? undefined,
       projectContext: projectContext ?? undefined,
-      adapter: this.adapter,   // enables ConversationStore + weight feedback
+      adapter: this.adapter,
+      agentRoot,   // agent source path — self-improvement tasks read the right files
     });
 
     // 6.5 — Collab-3: team sync worker (only if member of teams)

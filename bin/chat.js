@@ -124,6 +124,8 @@ function getCurrentProvider(cfg) {
 // ─── State ────────────────────────────────────────────────────────────────────
 let cfg         = loadConfig();
 let sessionId      = null;
+const messageQueue = [];       // queued tasks while session is running
+let lastFailedTask = null;     // for retry-on-abort
 let streaming      = false;
 let ws             = null;
 let wsReady        = false;
@@ -280,13 +282,34 @@ function handleWsEvent(event) {
       confirmServer(r, lineBuffer);
       lineBuffer = '';
       if (pendingResolve) { pendingResolve(); pendingResolve = null; }
-      rl.prompt();
+      sessionId = null;
+      // auto-drain queued messages
+      drainQueue();
       break;
     }
     case 'session.failed': {
       spinner.stop();
       if (streaming) { process.stdout.write('\n'); streaming = false; }
+      const isAbort = /aborted|timeout|AbortError/i.test(event.error ?? '');
       console.log(`\n  ${fmt(C.red, '✗')} ${event.error}\n`);
+      // Offer retry if it was a timeout/abort
+      if (isAbort && event.task) {
+        lastFailedTask = event.task;
+        process.stdout.write(`  ${fmt(C.yellow, '↺')} Retry this task? ${fmt(C.bold, '[y/N]')} `);
+        process.stdin.once('data', async (buf) => {
+          const ans = buf.toString().trim().toLowerCase();
+          process.stdout.write(ans + '\n');
+          if (ans === 'y' && lastFailedTask) {
+            messageQueue.unshift(lastFailedTask); // put at front of queue
+            lastFailedTask = null;
+          }
+          const resolve_ = pendingResolve;
+          pendingResolve = null; sessionId = null;
+          resolve_?.();
+          await drainQueue();
+        });
+        return; // don't fall through to pendingResolve below
+      }
       lineBuffer = '';
       if (pendingResolve) { pendingResolve(); pendingResolve = null; }
       rl.prompt();
@@ -402,8 +425,8 @@ async function runTask(input) {
           const resolve_ = pendingResolve;
           pendingResolve = null;
           sessionId = null;
-          resolve_();
-          rl.prompt();
+          resolve_?.();
+          drainQueue(); // auto-process queued messages
         }
       } catch {}
     }, 800);
@@ -505,6 +528,37 @@ async function handleCommand(input) {
     }
 
     // /status
+    // /update — check for updates and install immediately
+    case '/update': {
+      process.stdout.write(`  ${fmt(C.dim, 'Checking for updates...')}\n`);
+      try {
+        const pkgPath = resolve(new URL(import.meta.url).pathname, '..', '..', 'package.json');
+        const currentVersion = existsSync(pkgPath)
+          ? JSON.parse(readFileSync(pkgPath, 'utf8')).version
+          : '?';
+        const reg = await fetch('https://registry.npmjs.org/0agent/latest', {
+          signal: AbortSignal.timeout(5000),
+        }).then(r => r.json()).catch(() => null);
+        const latest = reg?.version;
+        if (!latest) { console.log(`  ${fmt(C.yellow, '⚠')} Could not reach npm registry\n`); break; }
+        if (!isNewerVersion(latest, currentVersion)) {
+          console.log(`  ${fmt(C.green, '✓')} Already on latest (${currentVersion})\n`);
+          break;
+        }
+        console.log(`  ${fmt(C.cyan, '↑')} Updating ${currentVersion} → ${latest}...`);
+        const { execSync: exs } = await import('node:child_process');
+        exs('npm install -g 0agent@latest --silent', { stdio: 'ignore', timeout: 120_000 });
+        process.stdout.write(`  ${fmt(C.green, '✓')} Updated to ${latest} — restarting...\n\n`);
+        const { spawn: sp } = await import('node:child_process');
+        const child = sp(process.argv[0], process.argv.slice(1), { stdio: 'inherit' });
+        child.on('close', (code) => process.exit(code ?? 0));
+        process.stdin.pause();
+      } catch (e) {
+        console.log(`  ${fmt(C.red, '✗')} Update failed: ${e.message}\n`);
+      }
+      break;
+    }
+
     case '/status': {
       try {
         const h = await fetch(`${BASE_URL}/api/health`).then(r => r.json());
@@ -843,20 +897,44 @@ function isNewerVersion(a, b) {
 }
 
 
+// ─── Message queue + serial executor ─────────────────────────────────────────
+
+const COMMAND_PREFIXES = ['/model','/key','/status','/skills','/graph','/clear','/help','/schedule','/update'];
+
+async function executeInput(line) {
+  const isCmd = line.startsWith('/') || COMMAND_PREFIXES.some(c => line.startsWith(c));
+  if (isCmd) {
+    await handleCommand(line);
+  } else {
+    lastFailedTask = null;
+    await runTask(line);
+  }
+  // After this input completes, drain the queue
+  await drainQueue();
+}
+
+async function drainQueue() {
+  if (messageQueue.length === 0) { if (!streaming) rl.prompt(); return; }
+  const next = messageQueue.shift();
+  if (messageQueue.length > 0) {
+    console.log(`  ${fmt(C.dim, `[${messageQueue.length} more in queue]`)}`);
+  }
+  await executeInput(next);
+}
+
 rl.on('line', async (input) => {
   const line = input.trim();
   if (!line) { rl.prompt(); return; }
 
-  if (line.startsWith('/') || ['/model','/key','/status','/skills','/graph','/clear','/help','/schedule'].some(c => line.startsWith(c))) {
-    await handleCommand(line);
-    rl.prompt();
-  } else {
-    await runTask(line);
-    // runTask resolves when session completes (via WS or polling fallback)
-    // rl.prompt() may already have been called by the handler that resolved it,
-    // but calling it again is a safe no-op if readline is already prompting
-    if (!streaming) rl.prompt();
+  // If a session is already running, queue the message
+  if (pendingResolve) {
+    messageQueue.push(line);
+    const qLen = messageQueue.length;
+    process.stdout.write(`\n  ${fmt(C.dim, `↳ queued [${qLen}]`)} ${fmt(C.dim, line.slice(0, 60))}\n`);
+    return;
   }
+
+  await executeInput(line);
 });
 
 rl.on('close', () => {

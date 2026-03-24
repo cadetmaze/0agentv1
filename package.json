@@ -1,6 +1,6 @@
 {
   "name": "0agent",
-  "version": "1.0.35",
+  "version": "1.0.36",
   "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
   "private": false,
   "license": "Apache-2.0",

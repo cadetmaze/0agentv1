@@ -33,13 +33,18 @@ export interface AgentExecutorConfig {
   cwd: string;
   max_iterations?: number;
   max_command_ms?: number;
+  agent_root?: string;   // path to 0agent source — injected for self-improvement tasks
 }
+
+// Self-modification trigger words — when detected, inject agent source path and extend timeout
+const SELF_MOD_PATTERN = /\b(yourself|the agent|this agent|this cli|0agent|your code|your source|agent cli|improve.*agent|update.*agent|add.*to.*agent|fix.*agent|self.?improv)\b/i;
 
 export class AgentExecutor {
   private cwd: string;
   private maxIterations: number;
   private maxCommandMs: number;
   private registry: CapabilityRegistry;
+  private agentRoot?: string;
 
   constructor(
     private llm: LLMExecutor,
@@ -50,6 +55,7 @@ export class AgentExecutor {
     this.cwd = config.cwd;
     this.maxIterations = config.max_iterations ?? 20;
     this.maxCommandMs = config.max_command_ms ?? 30_000;
+    this.agentRoot = config.agent_root;
     this.registry = new CapabilityRegistry();
   }
 
@@ -59,10 +65,17 @@ export class AgentExecutor {
     let totalTokens = 0;
     let modelName = '';
 
-    const systemPrompt = this.buildSystemPrompt(systemContext);
+    const isSelfMod = this.isSelfModTask(task);
+    const systemPrompt = this.buildSystemPrompt(systemContext, task);
     const messages: LLMMessage[] = [
       { role: 'user', content: task },
     ];
+
+    // Self-improvement tasks need more time: more turns, longer LLM timeout
+    if (isSelfMod) {
+      this.maxIterations = Math.max(this.maxIterations, 30);
+      this.onStep('Self-modification mode — reading source files…');
+    }
 
     let finalOutput = '';
 
@@ -349,7 +362,9 @@ export class AgentExecutor {
     return resolved.startsWith(this.cwd) ? resolved : null;
   }
 
-  private buildSystemPrompt(extra?: string): string {
+  private buildSystemPrompt(extra?: string, task?: string): string {
+    const isSelfMod = !!(task && SELF_MOD_PATTERN.test(task));
+
     const lines = [
       `You are 0agent, an AI software engineer. You can execute shell commands and manage files.`,
       `Working directory: ${this.cwd}`,
@@ -359,17 +374,50 @@ export class AgentExecutor {
       `- For web servers/background processes: ALWAYS redirect output to avoid hanging:`,
       `  cmd > /tmp/0agent-server.log 2>&1 &`,
       `  Example: python3 -m http.server 3000 > /tmp/0agent-server.log 2>&1 &`,
-      `  Example: node server.js > /tmp/0agent-server.log 2>&1 &`,
       `  NEVER run background commands without redirecting output.`,
       `- For npm/node projects: check package.json first with read_file or list_dir`,
       `- After write_file, verify with read_file if needed`,
       `- After shell_exec, check output for errors and retry if needed`,
       `- For research tasks: use web_search first, then scrape_url for full page content`,
-    `- Use relative paths from the working directory`,
+      `- Use relative paths from the working directory`,
       `- Be concise in your final response: state what was done and where to find it`,
     ];
+
+    // Self-improvement context — injected when task is about modifying the agent itself
+    if (isSelfMod && this.agentRoot) {
+      lines.push(
+        ``,
+        `═══ SELF-MODIFICATION MODE ═══`,
+        `You are being asked to improve YOUR OWN SOURCE CODE.`,
+        ``,
+        `Your source is at: ${this.agentRoot}`,
+        `Key files (edit THESE, not dist/):`,
+        `  ${this.agentRoot}/bin/chat.js                    ← the chat TUI you are running in`,
+        `  ${this.agentRoot}/bin/0agent.js                  ← CLI entry point`,
+        `  ${this.agentRoot}/packages/daemon/src/           ← daemon source`,
+        `  ${this.agentRoot}/packages/daemon/src/capabilities/ ← tools (shell, browser, etc.)`,
+        ``,
+        `⚠ CRITICAL TOKEN LIMIT RULES:`,
+        `  - Use shell_exec("head -100 FILE") or ("sed -n '50,100p' FILE") to read SECTIONS of files`,
+        `  - NEVER cat an entire source file — they are thousands of lines`,
+        `  - Read only the function/section you need to modify`,
+        `  - When writing changes, write ONLY the modified function/section, not the entire file`,
+        `  - Use shell_exec("grep -n 'functionName' FILE") to find the right line numbers first`,
+        ``,
+        `After making changes:`,
+        `  1. cd ${this.agentRoot} && node scripts/bundle.mjs`,
+        `  2. pkill -f "daemon.mjs"`,
+        `═══════════════════════════`,
+      );
+    }
+
     if (extra) lines.push(``, `Context:`, extra);
     return lines.join('\n');
+  }
+
+  /** Returns true if task is a self-modification request. Self-mod tasks get longer LLM timeouts. */
+  isSelfModTask(task: string): boolean {
+    return SELF_MOD_PATTERN.test(task);
   }
 
   private summariseInput(toolName: string, input: Record<string, unknown>): string {

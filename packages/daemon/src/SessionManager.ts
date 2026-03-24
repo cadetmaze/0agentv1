@@ -67,9 +67,10 @@ export interface SessionManagerDeps {
   graph?: KnowledgeGraph;
   llm?: LLMExecutor;
   cwd?: string;
-  identity?: UserIdentity;              // Collab-1: who is running sessions
-  projectContext?: ProjectContext;      // Collab-1: what project we're in
-  adapter?: SQLiteAdapter;             // for ConversationStore + WeightEventLog
+  identity?: UserIdentity;
+  projectContext?: ProjectContext;
+  adapter?: SQLiteAdapter;
+  agentRoot?: string;  // path to 0agent source for self-improvement tasks
 }
 
 // ─── SessionManager ──────────────────────────────────
@@ -86,6 +87,7 @@ export class SessionManager {
   private conversationStore?: ConversationStore;
   private weightUpdater?: EdgeWeightUpdater;
   private anthropicFetcher = new AnthropicSkillFetcher();
+  private agentRoot?: string;
 
   constructor(deps: SessionManagerDeps = {}) {
     this.inferenceEngine = deps.inferenceEngine;
@@ -95,6 +97,7 @@ export class SessionManager {
     this.cwd = deps.cwd ?? process.cwd();
     this.identity = deps.identity;
     this.projectContext = deps.projectContext;
+    this.agentRoot = deps.agentRoot;
 
     if (deps.adapter) {
       // Conversation history — so "make it dark mode" knows what "it" is
@@ -338,7 +341,7 @@ export class SessionManager {
       if (activeLLM?.isConfigured) {
         const executor = new AgentExecutor(
           activeLLM,
-          { cwd: this.cwd },
+          { cwd: this.cwd, agent_root: this.agentRoot },
           // step callback → emit session.step events
           (step) => this.addStep(sessionId, step),
           // token callback → emit session.token events
@@ -382,7 +385,7 @@ export class SessionManager {
           const { SelfHealLoop } = await import('./SelfHealLoop.js');
           const healLoop = new SelfHealLoop(
             activeLLM,
-            { cwd: this.cwd },
+            { cwd: this.cwd, agent_root: this.agentRoot },
             (step) => this.addStep(sessionId, step),
             (token) => this.emit({ type: 'session.token', session_id: sessionId, token }),
           );

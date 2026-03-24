@@ -208,7 +208,7 @@ export class LLMExecutor {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(60_000),  // 60s timeout
+      signal: AbortSignal.timeout(120_000),  // 60s timeout
     });
 
     if (!res.ok) {
@@ -347,7 +347,7 @@ export class LLMExecutor {
         'Authorization': `Bearer ${this.config.api_key}`,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(120_000),
     });
 
     if (!res.ok) {
