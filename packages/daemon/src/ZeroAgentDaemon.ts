@@ -36,6 +36,7 @@ import { WebSocketEventBus } from './WebSocketEvents.js';
 import { BackgroundWorkers } from './BackgroundWorkers.js';
 import { SkillRegistry } from './SkillRegistry.js';
 import { HTTPServer } from './HTTPServer.js';
+import { LLMExecutor } from './LLMExecutor.js';
 import type { DaemonStatus } from './routes/health.js';
 
 // ─── Types ───────────────────────────────────────────
@@ -89,11 +90,30 @@ export class ZeroAgentDaemon {
     this.skillRegistry = new SkillRegistry();
     await this.skillRegistry.loadAll();
 
-    // 5. Create SessionManager
+    // 5. Create LLM executor from config
+    const defaultLLM = this.config.llm_providers.find(p => p.is_default) ?? this.config.llm_providers[0];
+    const llmExecutor = defaultLLM
+      ? new LLMExecutor({
+          provider: defaultLLM.provider,
+          model: defaultLLM.model,
+          api_key: defaultLLM.api_key ?? '',
+          base_url: defaultLLM.base_url,
+        })
+      : undefined;
+
+    if (llmExecutor?.isConfigured) {
+      console.log(`[0agent] LLM: ${defaultLLM?.provider}/${defaultLLM?.model}`);
+    } else {
+      console.warn('[0agent] No LLM API key configured — tasks will not call the LLM');
+    }
+
+    // 6. Create SessionManager
     this.eventBus = new WebSocketEventBus();
     this.sessionManager = new SessionManager({
       inferenceEngine: this.inferenceEngine,
       eventBus: this.eventBus,
+      graph: this.graph,
+      llm: llmExecutor,
     });
 
     // 6. Create BackgroundWorkers, start them

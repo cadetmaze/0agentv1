@@ -14,6 +14,7 @@ import type {
 
 import type { IEventBus } from './WebSocketEvents.js';
 import { EntityScopedContextLoader } from './EntityScopedContext.js';
+import type { LLMExecutor } from './LLMExecutor.js';
 
 // ─── Types ───────────────────────────────────────────
 
@@ -53,6 +54,7 @@ export interface SessionManagerDeps {
   inferenceEngine?: IInferenceEngine;
   eventBus?: IEventBus;
   graph?: KnowledgeGraph;
+  llm?: LLMExecutor;
 }
 
 // ─── SessionManager ──────────────────────────────────
@@ -62,11 +64,13 @@ export class SessionManager {
   private inferenceEngine?: IInferenceEngine;
   private eventBus?: IEventBus;
   private graph?: KnowledgeGraph;
+  private llm?: LLMExecutor;
 
   constructor(deps: SessionManagerDeps = {}) {
     this.inferenceEngine = deps.inferenceEngine;
     this.eventBus = deps.eventBus;
     this.graph = deps.graph;
+    this.llm = deps.llm;
   }
 
   /**
@@ -269,12 +273,31 @@ export class SessionManager {
         this.addStep(session.id, 'No inference engine connected — executing task directly');
       }
 
-      // Step 5: execution note (subagents come in Phase 3+ wiring)
-      this.addStep(session.id, 'Executing…');
+      // Step 5: call LLM to actually execute the task
+      this.addStep(session.id, 'Calling LLM…');
+      let output = '';
 
-      // Step 6: done
-      const output = session.plan?.reasoning ?? 'Task queued — no plan selected';
-      this.addStep(session.id, `Completed: ${output}`);
+      if (this.llm?.isConfigured) {
+        try {
+          const systemPrompt = enrichedReq.context?.system_context
+            ? String(enrichedReq.context.system_context)
+            : `You are 0agent, a helpful AI assistant. Complete the user's task directly and concisely. If the task involves creating files, writing code, or running commands, provide the exact output needed.`;
+
+          const llmRes = await this.llm.complete([
+            { role: 'user', content: enrichedReq.task },
+          ], systemPrompt);
+
+          output = llmRes.content;
+          this.addStep(session.id, `LLM responded (${llmRes.tokens_used} tokens, ${llmRes.model})`);
+        } catch (llmErr) {
+          const msg = llmErr instanceof Error ? llmErr.message : String(llmErr);
+          this.addStep(session.id, `LLM error: ${msg}`);
+          output = `Error calling LLM: ${msg}`;
+        }
+      } else {
+        output = session.plan?.reasoning ?? 'No LLM configured — add API key to ~/.0agent/config.yaml';
+        this.addStep(session.id, 'No LLM configured (set api_key in ~/.0agent/config.yaml)');
+      }
 
       this.completeSession(session.id, {
         output,
