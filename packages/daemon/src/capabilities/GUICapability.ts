@@ -19,6 +19,7 @@
  *   find_and_click  — OCR-find text on screen and click it
  *   get_screen_size — return screen width × height
  *   get_cursor_pos  — return current mouse cursor position (x, y)
+ *   open_url        — open a URL in the existing browser window (no new window), launch browser if needed
  *   open_app        — open an application by name (macOS/Linux)
  */
 
@@ -40,7 +41,8 @@ export class GUICapability implements Capability {
       'type text, press keyboard shortcuts, scroll, open apps. ' +
       'IMPORTANT: Limit screenshots to at most 3 per task — avoid re-screenshotting if you already know the layout. ' +
       'Prefer targeted actions (click, find_and_click, hotkey) over repeated screenshots. ' +
-      'Use get_cursor_pos to check cursor position without a full screenshot.',
+      'Use get_cursor_pos to check cursor position without a full screenshot. ' +
+      'To open a website, ALWAYS use action="open_url" — never open_app + new tab, which creates duplicate windows.',
     input_schema: {
       type: 'object',
       properties: {
@@ -49,7 +51,7 @@ export class GUICapability implements Capability {
           description:
             '"screenshot" | "click" | "double_click" | "right_click" | "move" | ' +
             '"type" | "hotkey" | "scroll" | "drag" | "find_and_click" | ' +
-            '"get_screen_size" | "get_cursor_pos" | "open_app"',
+            '"get_screen_size" | "get_cursor_pos" | "open_url" | "open_app"',
         },
         x:         { type: 'number',  description: 'X coordinate (pixels from left)' },
         y:         { type: 'number',  description: 'Y coordinate (pixels from top)' },
@@ -60,6 +62,7 @@ export class GUICapability implements Capability {
         direction: { type: 'string',  description: '"up" | "down" | "left" | "right" for scroll' },
         amount:    { type: 'number',  description: 'Scroll clicks (default 3)' },
         app:       { type: 'string',  description: 'App name to open e.g. "Safari", "Terminal", "Chrome"' },
+        url:       { type: 'string',  description: 'URL to open e.g. "https://example.com" (use with open_url)' },
         interval:  { type: 'number',  description: 'Seconds to wait between actions (default 0.05)' },
         duration:  { type: 'number',  description: 'Seconds for mouse movement animation (default 0.2)' },
       },
@@ -73,7 +76,7 @@ export class GUICapability implements Capability {
 
     const script = this._buildScript(action, input);
     if (!script) {
-      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, open_app`, duration_ms: 0 };
+      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, open_url, open_app`, duration_ms: 0 };
     }
 
     // Write to a temp file so we don't hit inline quoting limits
@@ -136,6 +139,7 @@ export class GUICapability implements Capability {
     const dir      = input.direction != null ? String(input.direction): 'down';
     const amount   = input.amount    != null ? Number(input.amount)  : 3;
     const app      = input.app       != null ? String(input.app)     : '';
+    const url      = input.url       != null ? String(input.url)     : '';
     const interval = input.interval  != null ? Number(input.interval): 0.05;
     const duration = input.duration  != null ? Number(input.duration): 0.2;
 
@@ -319,6 +323,67 @@ finally:
         os.remove(shot_path)
     except Exception:
         pass
+`;
+      }
+
+      case 'open_url': {
+        if (!url) return null;
+        const safeUrl = url.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const osName = platform();
+        if (osName === 'darwin') {
+          return header + `
+import subprocess
+
+url = '${safeUrl}'
+
+# Check if Chrome is running
+chrome_running = subprocess.run(['pgrep', '-x', 'Google Chrome'], capture_output=True).returncode == 0
+firefox_running = subprocess.run(['pgrep', '-x', 'firefox'], capture_output=True).returncode == 0
+safari_running  = subprocess.run(['pgrep', '-x', 'Safari'], capture_output=True).returncode == 0
+
+if chrome_running:
+    # Open in existing Chrome window — no new window created
+    script = f'tell application "Google Chrome" to open location "{url}"'
+    subprocess.run(['osascript', '-e', script])
+    subprocess.run(['osascript', '-e', 'tell application "Google Chrome" to activate'])
+    print(f"Navigated Chrome to: {url}")
+elif firefox_running:
+    script = f'tell application "Firefox" to open location "{url}"'
+    subprocess.run(['osascript', '-e', script])
+    subprocess.run(['osascript', '-e', 'tell application "Firefox" to activate'])
+    print(f"Navigated Firefox to: {url}")
+elif safari_running:
+    script = f'tell application "Safari" to open location "{url}"'
+    subprocess.run(['osascript', '-e', script])
+    subprocess.run(['osascript', '-e', 'tell application "Safari" to activate'])
+    print(f"Navigated Safari to: {url}")
+else:
+    # No browser open — launch default browser with the URL
+    subprocess.run(['open', url])
+    print(f"Launched browser with: {url}")
+time.sleep(1.0)
+`;
+        }
+        // Linux
+        return header + `
+import subprocess
+
+url = '${safeUrl}'
+
+# Try to reuse existing browser via wmctrl/xdotool, fall back to xdg-open
+chrome_pid = subprocess.run(['pgrep', '-x', 'chrome'], capture_output=True)
+firefox_pid = subprocess.run(['pgrep', '-x', 'firefox'], capture_output=True)
+
+if chrome_pid.returncode == 0:
+    subprocess.Popen(['google-chrome', '--new-tab', url])
+    print(f"Opened in Chrome tab: {url}")
+elif firefox_pid.returncode == 0:
+    subprocess.Popen(['firefox', '--new-tab', url])
+    print(f"Opened in Firefox tab: {url}")
+else:
+    subprocess.Popen(['xdg-open', url])
+    print(f"Opened with default browser: {url}")
+time.sleep(1.0)
 `;
       }
 
