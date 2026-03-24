@@ -469,10 +469,9 @@ connectWS();
   } catch {
     // Auto-start
     startSpin.start();
-    const { resolve: res, existsSync: ef } = await import('node:path').then(m => m);
-    const pkgRoot = res(new URL(import.meta.url).pathname, '..', '..');
-    const bundled = res(pkgRoot, 'dist', 'daemon.mjs');
-    if (ef(bundled) && ef(CONFIG_PATH)) {
+    const pkgRoot = resolve(new URL(import.meta.url).pathname, '..', '..');
+    const bundled  = resolve(pkgRoot, 'dist', 'daemon.mjs');
+    if (existsSync(bundled) && existsSync(CONFIG_PATH)) {
       const { spawn } = await import('node:child_process');
       const child = spawn(process.execPath, [bundled], { detached: true, stdio: 'ignore', env: { ...process.env, ZEROAGENT_CONFIG: CONFIG_PATH } });
       child.unref();
