@@ -234,14 +234,14 @@ async function startDaemon() {
     process.exit(1);
   }
 
-  // Find the daemon start.js — look relative to this file
-  const startScript = resolve(
-    dirname(new URL(import.meta.url).pathname),
-    '..', 'packages', 'daemon', 'dist', 'start.js'
-  );
+  // Find the bundled daemon — ships as dist/daemon.mjs in the npm package
+  const pkgRoot = resolve(dirname(new URL(import.meta.url).pathname), '..');
+  const bundled  = resolve(pkgRoot, 'dist', 'daemon.mjs');
+  const devPath  = resolve(pkgRoot, 'packages', 'daemon', 'dist', 'start.js');
+  const startScript = existsSync(bundled) ? bundled : devPath;
 
   if (!existsSync(startScript)) {
-    console.error(`  Daemon not built. Run: pnpm build\n  Then try again.`);
+    console.error(`  Daemon not found. Run: node scripts/bundle.mjs\n  Then try again.`);
     process.exit(1);
   }
 

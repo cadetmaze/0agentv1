@@ -1,6 +1,6 @@
 {
   "name": "0agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
   "private": false,
   "license": "Apache-2.0",
@@ -10,32 +10,21 @@
   },
   "files": [
     "bin/",
-    "packages/core/dist/",
-    "packages/core/package.json",
-    "packages/mcp-hub/dist/",
-    "packages/mcp-hub/package.json",
-    "packages/daemon/dist/",
-    "packages/daemon/package.json",
-    "packages/subagent/dist/",
-    "packages/subagent/package.json",
-    "packages/subagent-runtime/dist/",
-    "packages/subagent-runtime/package.json",
+    "dist/",
     "skills/",
-    "seeds/",
-    "pnpm-workspace.yaml",
-    "turbo.json",
-    "tsconfig.base.json"
+    "seeds/"
   ],
   "scripts": {
     "build": "turbo run build",
+    "bundle": "node scripts/bundle.mjs",
     "test": "turbo run test",
     "lint": "turbo run lint",
-    "prepublishOnly": "pnpm build --filter='!@0agent/dashboard' --filter='!@0agent/core-native'"
+    "prepublishOnly": "pnpm build --filter='!@0agent/dashboard' --filter='!@0agent/core-native' && node scripts/bundle.mjs"
   },
   "dependencies": {
+    "@hono/node-server": "^1.13.0",
     "better-sqlite3": "^11.6.0",
     "hono": "^4.6.0",
-    "@hono/node-server": "^1.13.0",
     "ws": "^8.18.0",
     "yaml": "^2.6.0",
     "zod": "^3.23.0"
@@ -43,6 +32,7 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@types/node": "^25.5.0",
+    "esbuild": "^0.27.4",
     "turbo": "^2.1.0",
     "typescript": "^5.5.0"
   },
