@@ -16,12 +16,16 @@ import { WeightEventLog, EdgeWeightUpdater } from '@0agent/core';
 
 import type { IEventBus } from './WebSocketEvents.js';
 import { EntityScopedContextLoader } from './EntityScopedContext.js';
-import type { LLMExecutor } from './LLMExecutor.js';
+import { LLMExecutor } from './LLMExecutor.js';
 import { AgentExecutor } from './AgentExecutor.js';
 import { AnthropicSkillFetcher } from './AnthropicSkillFetcher.js';
 import type { UserIdentity } from './IdentityManager.js';
 import { ProjectScanner, type ProjectContext } from './ProjectScanner.js';
 import { ConversationStore } from './ConversationStore.js';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import YAML from 'yaml';
 
 // ─── Types ───────────────────────────────────────────
 
@@ -315,9 +319,10 @@ export class SessionManager {
       }
 
       // Step 5: execute via AgentExecutor (real tool calling + streaming)
-      if (this.llm?.isConfigured) {
+      const activeLLM = this.getFreshLLM();  // always latest key from config
+      if (activeLLM?.isConfigured) {
         const executor = new AgentExecutor(
-          this.llm,
+          activeLLM,
           { cwd: this.cwd },
           // step callback → emit session.step events
           (step) => this.addStep(session.id, step),
@@ -361,7 +366,7 @@ export class SessionManager {
         try {
           const { SelfHealLoop } = await import('./SelfHealLoop.js');
           const healLoop = new SelfHealLoop(
-            this.llm,
+            activeLLM,
             { cwd: this.cwd },
             (step) => this.addStep(session.id, step),
             (token) => this.emit({ type: 'session.token', session_id: session.id, token }),
@@ -431,8 +436,9 @@ export class SessionManager {
           model: agentResult.model,
         });
       } else {
-        const output = session.plan?.reasoning ?? 'No LLM configured — add api_key to ~/.0agent/config.yaml';
-        this.addStep(session.id, 'No LLM API key configured');
+        const cfgPath = resolve(homedir(), '.0agent', 'config.yaml');
+        const output = `No LLM API key found. Add one to ${cfgPath} or run: 0agent init`;
+        this.addStep(session.id, '⚠ No LLM API key configured — run: 0agent init');
         this.completeSession(session.id, { output });
       }
     } catch (err: unknown) {
@@ -468,6 +474,33 @@ export class SessionManager {
     if (this.eventBus) {
       this.eventBus.emit(event);
     }
+  }
+
+  /**
+   * Always returns a fresh LLM executor with the latest API key from disk.
+   * Fixes stale-daemon problem: if the user sets their key AFTER the daemon
+   * started, the next session picks it up automatically.
+   */
+  private getFreshLLM(): LLMExecutor | undefined {
+    try {
+      const configPath = resolve(homedir(), '.0agent', 'config.yaml');
+      if (!existsSync(configPath)) return this.llm;
+      const raw = readFileSync(configPath, 'utf8');
+      const cfg = YAML.parse(raw) as Record<string, unknown>;
+      const providers = cfg.llm_providers as Array<Record<string, unknown>> | undefined;
+      if (!providers?.length) return this.llm;
+      const def = providers.find(p => p.is_default) ?? providers[0];
+      if (!def) return this.llm;
+      const freshExec = new LLMExecutor({
+        provider: String(def.provider ?? 'anthropic'),
+        model:    String(def.model    ?? 'claude-sonnet-4-6'),
+        api_key:  String(def.api_key  ?? ''),
+        base_url: def.base_url ? String(def.base_url) : undefined,
+      });
+      // If fresh exec has a key but stored one doesn't, use fresh
+      if (freshExec.isConfigured) return freshExec;
+    } catch {}
+    return this.llm;
   }
 
   /**

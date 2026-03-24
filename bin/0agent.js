@@ -352,6 +352,9 @@ ${ghToken && ghOwner ? `\ngithub_memory:\n  enabled: true\n  token: "${ghToken}"
     console.log('  ✓ Built-in skills installed');
   }
 
+  // Always kill any existing daemon so the new config (with API key) is loaded
+  try { stopDaemon(); await sleep(800); } catch {}
+
   console.log('\n  Starting daemon...\n');
   await startDaemon();
 }
