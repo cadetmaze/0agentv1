@@ -88,6 +88,20 @@ export const AGENT_TOOLS: ToolDefinition[] = [
       },
     },
   },
+  {
+    name: 'scrape_url',
+    description: 'Scrape a URL and return clean structured content. Handles JavaScript-rendered pages, auto-adapts to page structure, returns text/links/metadata. Better than shell curl for web pages.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url:     { type: 'string',  description: 'URL to scrape' },
+        mode:    { type: 'string',  description: 'What to extract: "text" (default), "links", "tables", "full", "markdown"' },
+        selector:{ type: 'string',  description: 'Optional CSS selector to target specific element' },
+        wait_ms: { type: 'number',  description: 'Wait N ms after page load (for JS-heavy pages, default 0)' },
+      },
+      required: ['url'],
+    },
+  },
 ];
 
 export class LLMExecutor {

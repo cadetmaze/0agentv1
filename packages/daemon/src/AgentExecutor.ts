@@ -158,6 +158,13 @@ export class AgentExecutor {
         return this.readFile(String(input.path ?? ''));
       case 'list_dir':
         return this.listDir(input.path ? String(input.path) : undefined);
+      case 'scrape_url':
+        return this.scrapeUrl(
+          String(input.url ?? ''),
+          String(input.mode ?? 'text'),
+          input.selector ? String(input.selector) : undefined,
+          Number(input.wait_ms ?? 0),
+        );
       default:
         return `Unknown tool: ${name}`;
     }
@@ -206,6 +213,55 @@ export class AgentExecutor {
       : content;
   }
 
+  private async scrapeUrl(url: string, mode: string, selector?: string, waitMs?: number): Promise<string> {
+    if (!url.startsWith('http')) return 'Error: URL must start with http:// or https://';
+
+    // Build a Python script using Scrapling (auto-installs if missing)
+    const selectorLine = selector ? `element = page.find('${selector}')\ncontent = element.text if element else page.get_all_text()` : `content = page.get_all_text()`;
+    const modeLine = mode === 'links'
+      ? `result = [a.attrib.get('href','') for a in page.find_all('a') if a.attrib.get('href','').startswith('http')]`
+      : mode === 'tables'
+      ? `result = [str(t) for t in page.find_all('table')]`
+      : mode === 'markdown'
+      ? `result = page.get_all_text()`
+      : `result = page.get_all_text()`;
+
+    const script = [
+      `import sys`,
+      `try:`,
+      `    from scrapling import Fetcher`,
+      `except ImportError:`,
+      `    import subprocess, sys`,
+      `    subprocess.run([sys.executable, '-m', 'pip', 'install', 'scrapling', '-q'], check=True)`,
+      `    from scrapling import Fetcher`,
+      `try:`,
+      `    fetcher = Fetcher(auto_match=False)`,
+      `    page = fetcher.get('${url}', timeout=20)`,
+      `    ${modeLine}`,
+      `    if isinstance(result, list):`,
+      `        print('\\n'.join(str(r) for r in result[:50]))`,
+      `    else:`,
+      `        text = str(result).strip()`,
+      `        print(text[:6000] + ('...[truncated]' if len(text)>6000 else ''))`,
+      `except Exception as e:`,
+      `    # Fallback to simple fetch if scrapling fails`,
+      `    import urllib.request`,
+      `    try:`,
+      `        req = urllib.request.Request('${url}', headers={'User-Agent': 'Mozilla/5.0'})`,
+      `        with urllib.request.urlopen(req, timeout=15) as resp:`,
+      `            body = resp.read().decode('utf-8', errors='ignore')`,
+      `            # Strip tags simply`,
+      `            import re`,
+      `            text = re.sub(r'<[^>]+>', ' ', body)`,
+      `            text = re.sub(r'\\s+', ' ', text).strip()`,
+      `            print(text[:5000])`,
+      `    except Exception as e2:`,
+      `        print(f'Scrape failed: {e} / {e2}', file=sys.stderr)`,
+    ].join('\n');
+
+    return this.shellExec(`python3 -c "${script.replace(/"/g, '\\"').replace(/\n/g, ';')}"`, 30_000);
+  }
+
   private listDir(dirPath?: string): string {
     const safe = this.safePath(dirPath ?? '.');
     if (!safe) return 'Error: path outside working directory';
@@ -247,10 +303,11 @@ export class AgentExecutor {
   }
 
   private summariseInput(toolName: string, input: Record<string, unknown>): string {
-    if (toolName === 'shell_exec') return `"${String(input.command ?? '').slice(0, 60)}"`;
-    if (toolName === 'write_file') return `"${input.path}"`;
-    if (toolName === 'read_file')  return `"${input.path}"`;
-    if (toolName === 'list_dir')   return `"${input.path ?? '.'}"`;
+    if (toolName === 'shell_exec')  return `"${String(input.command ?? '').slice(0, 60)}"`;
+    if (toolName === 'write_file')  return `"${input.path}"`;
+    if (toolName === 'read_file')   return `"${input.path}"`;
+    if (toolName === 'list_dir')    return `"${input.path ?? '.'}"`;
+    if (toolName === 'scrape_url')  return `"${String(input.url ?? '').slice(0, 60)}" mode=${input.mode ?? 'text'}`;
     return JSON.stringify(input).slice(0, 60);
   }
 }
