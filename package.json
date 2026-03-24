@@ -1,6 +1,6 @@
 {
   "name": "0agent",
-  "version": "1.0.52",
+  "version": "1.0.53",
   "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
   "private": false,
   "license": "Apache-2.0",
@@ -13,14 +13,14 @@
     "bin/",
     "dist/",
     "skills/",
-    "seeds/",
-    "bin/chat.js"
+    "seeds/"
   ],
   "scripts": {
     "build": "turbo run build",
     "bundle": "node scripts/bundle.mjs",
     "test": "turbo run test",
     "lint": "turbo run lint",
+    "postinstall": "node bin/postinstall.js",
     "prepublishOnly": "pnpm build --filter='!@0agent/dashboard' --filter='!@0agent/core-native' && node scripts/bundle.mjs"
   },
   "dependencies": {
