@@ -135,7 +135,7 @@ export class SessionManager {
 
     this.emit({
       type: 'session.started',
-      session_id: session.id,
+      session_id: id,
       task: session.task,
     });
 
@@ -169,7 +169,7 @@ export class SessionManager {
 
     this.emit({
       type: 'session.step',
-      session_id: session.id,
+      session_id: id,
       step: description,
       result: result ?? null,
     });
@@ -188,7 +188,7 @@ export class SessionManager {
 
     this.emit({
       type: 'session.completed',
-      session_id: session.id,
+      session_id: id,
       result: result ?? null,
     });
 
@@ -206,7 +206,7 @@ export class SessionManager {
 
     this.emit({
       type: 'session.failed',
-      session_id: session.id,
+      session_id: id,
       error,
     });
 
@@ -224,7 +224,7 @@ export class SessionManager {
 
     this.emit({
       type: 'session.failed',
-      session_id: session.id,
+      session_id: id,
       error: 'cancelled',
     });
 
@@ -251,6 +251,15 @@ export class SessionManager {
    * End-to-end session run: create -> start -> resolve -> step -> complete.
    * Wraps everything in try/catch to fail gracefully.
    */
+  /**
+   * Called by the route AFTER it already created the session.
+   * Uses the existing session ID — no duplicate creation.
+   */
+  async runExistingSession(sessionId: string, req: CreateSessionRequest): Promise<Session> {
+    return this._executeSession(sessionId, req);
+  }
+
+  /** @deprecated Use runExistingSession from routes — this creates a duplicate session. */
   async runSession(req: CreateSessionRequest): Promise<Session> {
     // Resolve entity-scoped context before creating the session so the
     // personality_prompt can be prepended to the task's system context.
@@ -277,44 +286,50 @@ export class SessionManager {
     }
 
     const session = this.createSession(enrichedReq);
+    return this._executeSession(session.id, enrichedReq);
+  }
 
+  /**
+   * Core execution — takes an EXISTING session ID and runs it.
+   * All callers must have created the session first.
+   */
+  private async _executeSession(sessionId: string, enrichedReq: CreateSessionRequest): Promise<Session> {
     try {
-      await this.startSession(session.id);
+      await this.startSession(sessionId);
 
       // Step 1: entity extraction
-      this.addStep(session.id, `Extracting entities from: "${req.task.slice(0, 60)}${req.task.length > 60 ? '…' : ''}"`);
+      this.addStep(sessionId, `Extracting entities from: "${enrichedReq.task.slice(0, 60)}${enrichedReq.task.length > 60 ? '…' : ''}"`);
 
       // Step 2: graph query
-      this.addStep(session.id, 'Querying knowledge graph (structural + semantic)…');
+      this.addStep(sessionId, 'Querying knowledge graph (structural + semantic)…');
 
       // Step 3: plan selection result
-      if (session.plan) {
-        const edge = session.plan.selected_edge;
+      const plan = this.getSession(sessionId)?.plan;
+      if (plan) {
+        const edge = plan.selected_edge;
         if (edge) {
-          this.addStep(session.id,
+          this.addStep(sessionId,
             `Selected plan: ${edge.from_label} → ${edge.to_label} (weight: ${edge.weight.toFixed(2)}, mode: ${edge.mode})`,
-            session.plan,
+            plan,
           );
         } else {
-          this.addStep(session.id, `No prior plan found — bootstrapping from scratch`, session.plan);
+          this.addStep(sessionId, `No prior plan found — bootstrapping from scratch`, plan);
         }
-
-        // Step 4: skill match
-        if (session.plan.skill) {
-          this.addStep(session.id, `Matched skill: /${session.plan.skill}`);
+        if (plan.skill) {
+          this.addStep(sessionId, `Matched skill: /${plan.skill}`);
         }
       } else {
-        this.addStep(session.id, 'No inference engine connected — executing task directly');
+        this.addStep(sessionId, 'No inference engine connected — executing task directly');
       }
 
       // Step 4.5: if skill matches an Anthropic skill, fetch instructions at runtime
       let anthropicContext: string | undefined;
       if (enrichedReq.skill && this.anthropicFetcher.isAnthropicSkill(enrichedReq.skill)) {
-        this.addStep(session.id, `Fetching skill instructions: ${enrichedReq.skill}`);
+        this.addStep(sessionId, `Fetching skill instructions: ${enrichedReq.skill}`);
         const fetched = await this.anthropicFetcher.fetch(enrichedReq.skill);
         if (fetched) {
           anthropicContext = this.anthropicFetcher.buildSystemPrompt(fetched);
-          this.addStep(session.id, `Loaded skill: ${fetched.name} (${fetched.cached ? 'cached' : 'fresh'})`);
+          this.addStep(sessionId, `Loaded skill: ${fetched.name} (${fetched.cached ? 'cached' : 'fresh'})`);
         }
       }
 
@@ -325,9 +340,9 @@ export class SessionManager {
           activeLLM,
           { cwd: this.cwd },
           // step callback → emit session.step events
-          (step) => this.addStep(session.id, step),
+          (step) => this.addStep(sessionId, step),
           // token callback → emit session.token events
-          (token) => this.emit({ type: 'session.token', session_id: session.id, token }),
+          (token) => this.emit({ type: 'session.token', session_id: sessionId, token }),
         );
 
         // Merge all context layers (Collab-1 identity + project + Anthropic skill + entity personality)
@@ -368,8 +383,8 @@ export class SessionManager {
           const healLoop = new SelfHealLoop(
             activeLLM,
             { cwd: this.cwd },
-            (step) => this.addStep(session.id, step),
-            (token) => this.emit({ type: 'session.token', session_id: session.id, token }),
+            (step) => this.addStep(sessionId, step),
+            (token) => this.emit({ type: 'session.token', session_id: sessionId, token }),
           );
           agentResult = await healLoop.executeWithHealing(enrichedReq.task, systemContext);
         } catch {
@@ -379,7 +394,7 @@ export class SessionManager {
 
         // ── Store conversation exchange (makes follow-up requests work) ──────
         if (this.conversationStore && userEntityId) {
-          const sessionId = session.id;
+          // sessionId already defined
           const now = Date.now();
           this.conversationStore.append({
             id: crypto.randomUUID(),
@@ -400,7 +415,7 @@ export class SessionManager {
         }
 
         // ── Outcome → weight feedback (graph learns from real task outcomes) ──
-        const selectedEdgeId = session.plan?.selected_edge?.edge_id;
+        const selectedEdgeId = this.getSession(sessionId)?.plan?.selected_edge?.edge_id;
         if (selectedEdgeId && this.weightUpdater && this.graph) {
           const outcomeSignal = this.computeOutcomeSignal(agentResult as unknown as Record<string, unknown>);
           if (outcomeSignal !== 0) {
@@ -412,7 +427,7 @@ export class SessionManager {
               await this.weightUpdater.update(
                 edge.id, edge.weight, newWeight,
                 outcomeSignal > 0 ? 'task_outcome_positive' : 'task_outcome_negative',
-                session.id
+                sessionId
               );
               this.emit({ type: 'graph.weight_updated', edge_id: edge.id, old_weight: edge.weight, new_weight: newWeight });
             }
@@ -421,14 +436,14 @@ export class SessionManager {
 
         // Final summary step
         if (agentResult.files_written.length > 0) {
-          this.addStep(session.id, `Files written: ${agentResult.files_written.join(', ')}`);
+          this.addStep(sessionId, `Files written: ${agentResult.files_written.join(', ')}`);
         }
         if (agentResult.commands_run.length > 0) {
-          this.addStep(session.id, `Commands run: ${agentResult.commands_run.length}`);
+          this.addStep(sessionId, `Commands run: ${agentResult.commands_run.length}`);
         }
-        this.addStep(session.id, `Done (${agentResult.tokens_used} tokens, ${agentResult.iterations} LLM turns)`);
+        this.addStep(sessionId, `Done (${agentResult.tokens_used} tokens, ${agentResult.iterations} LLM turns)`);
 
-        this.completeSession(session.id, {
+        this.completeSession(sessionId, {
           output: agentResult.output,
           files_written: agentResult.files_written,
           commands_run: agentResult.commands_run,
@@ -438,15 +453,15 @@ export class SessionManager {
       } else {
         const cfgPath = resolve(homedir(), '.0agent', 'config.yaml');
         const output = `No LLM API key found. Add one to ${cfgPath} or run: 0agent init`;
-        this.addStep(session.id, '⚠ No LLM API key configured — run: 0agent init');
-        this.completeSession(session.id, { output });
+        this.addStep(sessionId, '⚠ No LLM API key configured — run: 0agent init');
+        this.completeSession(sessionId, { output });
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      this.failSession(session.id, message);
+      this.failSession(sessionId, message);
     }
 
-    return this.sessions.get(session.id)!;
+    return this.sessions.get(sessionId)!;
   }
 
   /**

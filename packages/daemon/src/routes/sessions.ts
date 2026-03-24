@@ -12,10 +12,11 @@ export function sessionRoutes(deps: { sessions: SessionManager }): Hono {
       return c.json({ error: 'task is required and must be a string' }, 400);
     }
 
+    // Create session once — get the ID
     const session = deps.sessions.createSession(body);
 
-    // Run asynchronously in the background — don't await
-    deps.sessions.runSession(body).catch(() => {
+    // Run it asynchronously using the SAME session ID
+    deps.sessions.runExistingSession(session.id, body).catch(() => {
       // Errors are handled inside runSession (failSession)
     });
 
@@ -24,17 +25,14 @@ export function sessionRoutes(deps: { sessions: SessionManager }): Hono {
 
   // GET /api/sessions — list all sessions
   app.get('/', (c) => {
-    const sessions = deps.sessions.listSessions();
-    return c.json(sessions);
+    return c.json(deps.sessions.listSessions());
   });
 
   // GET /api/sessions/:id — get session by id
   app.get('/:id', (c) => {
     const id = c.req.param('id');
     const session = deps.sessions.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
+    if (!session) return c.json({ error: 'Session not found' }, 404);
     return c.json(session);
   });
 
@@ -42,9 +40,7 @@ export function sessionRoutes(deps: { sessions: SessionManager }): Hono {
   app.delete('/:id', (c) => {
     const id = c.req.param('id');
     const session = deps.sessions.getSession(id);
-    if (!session) {
-      return c.json({ error: 'Session not found' }, 404);
-    }
+    if (!session) return c.json({ error: 'Session not found' }, 404);
     deps.sessions.cancelSession(id);
     return c.json({ ok: true });
   });

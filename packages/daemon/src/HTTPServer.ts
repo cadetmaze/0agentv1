@@ -33,6 +33,7 @@ import { subagentRoutes } from './routes/subagents.js';
 import { skillRoutes } from './routes/skills.js';
 import { insightsRoutes } from './routes/insights.js';
 import { memoryRoutes } from './routes/memory.js';
+import { llmRoutes } from './routes/llm.js';
 import type { SessionManager } from './SessionManager.js';
 import type { SkillRegistry } from './SkillRegistry.js';
 import type { GitHubMemorySync } from './GitHubMemorySync.js';
@@ -69,6 +70,7 @@ export class HTTPServer {
     this.app.route('/api/skills', skillRoutes({ skillRegistry: deps.skillRegistry }));
     this.app.route('/api/insights', insightsRoutes({ proactiveSurface: deps.proactiveSurface ?? null }));
     this.app.route('/api/memory',   memoryRoutes({ getSync: deps.getMemorySync ?? (() => null) }));
+    this.app.route('/api/llm',      llmRoutes());
 
     // Serve 3D knowledge graph at root and /graph
     const serveGraph = (c: any) => {

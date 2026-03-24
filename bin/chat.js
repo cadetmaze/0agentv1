@@ -485,26 +485,26 @@ connectWS();
     else { console.log(`  ${fmt(C.red, '✗')} Daemon failed. Run: 0agent start`); rl.prompt(); return; }
   }
 
-  // Step 2: lightweight direct API ping (1 token — fast, no daemon involved)
+  // Step 2: test LLM via the DAEMON (proves the daemon can reach the API, not just the CLI)
   const provider = getCurrentProvider(cfg);
-  if (!provider?.api_key?.trim() && provider?.provider !== 'ollama') {
-    console.log(`  ${fmt(C.yellow, '⚠')} No API key. Use: ${fmt(C.cyan, '/key ' + (provider?.provider ?? 'anthropic') + ' <key>')}\n`);
-  } else {
-    const llmSpin = new Spinner(`Checking ${provider.provider}/${provider.model}`);
-    llmSpin.start();
-    try {
-      const result = await pingLLM(provider);
-      llmSpin.stop();
-      if (result.ok) {
-        console.log(`  ${fmt(C.green, '✓')} ${fmt(C.cyan, result.model ?? provider.model)} is ready\n`);
-      } else {
-        console.log(`  ${fmt(C.red, '✗')} LLM error: ${result.error}`);
-        console.log(`  ${fmt(C.dim, 'Fix with: /key ' + provider.provider + ' <new-key>')}\n`);
-      }
-    } catch (e) {
-      llmSpin.stop();
-      console.log(`  ${fmt(C.yellow, '⚠')} Could not reach ${provider.provider}: ${e.message}\n`);
+  const llmSpin = new Spinner(`Checking ${provider?.provider ?? 'LLM'}/${provider?.model ?? '...'}`);
+  llmSpin.start();
+  try {
+    const res = await fetch(`${BASE_URL}/api/llm/ping`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await res.json();
+    llmSpin.stop();
+    if (data.ok) {
+      console.log(`  ${fmt(C.green, '✓')} ${fmt(C.cyan, data.provider + '/' + data.model)} — ${data.latency_ms}ms\n`);
+    } else {
+      console.log(`  ${fmt(C.red, '✗')} LLM unreachable: ${data.error}`);
+      console.log(`  ${fmt(C.dim, 'Fix: /key ' + (provider?.provider ?? 'anthropic') + ' <your-api-key>')}\n`);
     }
+  } catch (e) {
+    llmSpin.stop();
+    console.log(`  ${fmt(C.yellow, '⚠')} LLM check failed: ${e.message}\n`);
   }
 
   rl.prompt();
