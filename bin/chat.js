@@ -17,6 +17,30 @@ const AGENT_DIR   = resolve(homedir(), '.0agent');
 const CONFIG_PATH = resolve(AGENT_DIR, 'config.yaml');
 const BASE_URL    = process.env['ZEROAGENT_URL'] ?? 'http://localhost:4200';
 
+// ─── Spinner ──────────────────────────────────────────────────────────────────
+class Spinner {
+  constructor(msg = 'Thinking') {
+    this._msg = msg;
+    this._frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+    this._i = 0; this._timer = null; this._active = false;
+  }
+  start(msg) {
+    if (this._active) return;
+    if (msg) this._msg = msg;
+    this._active = true;
+    this._timer = setInterval(() => {
+      process.stdout.write(`\r  \x1b[36m${this._frames[this._i++ % this._frames.length]}\x1b[0m \x1b[2m${this._msg}\x1b[0m  `);
+    }, 80);
+  }
+  update(msg) { this._msg = msg; }
+  stop(clearIt = true) {
+    if (!this._active) return;
+    clearInterval(this._timer); this._timer = null; this._active = false;
+    if (clearIt) process.stdout.write('\r\x1b[2K');
+  }
+  get active() { return this._active; }
+}
+
 // ─── ANSI helpers ─────────────────────────────────────────────────────────────
 const C = {
   reset:   '\x1b[0m',
@@ -50,12 +74,13 @@ function getCurrentProvider(cfg) {
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let cfg         = loadConfig();
-let sessionId   = null;  // current chat session
-let streaming   = false; // mid-token-stream
-let ws          = null;  // WebSocket
-let wsReady     = false;
+let sessionId      = null;
+let streaming      = false;
+let ws             = null;
+let wsReady        = false;
 let pendingResolve = null;
-let lineBuffer  = '';    // accumulated line for stream
+let lineBuffer     = '';
+const spinner      = new Spinner('Thinking');
 const history   = [];    // command history for arrow keys
 
 // ─── Header ──────────────────────────────────────────────────────────────────
@@ -102,17 +127,21 @@ function handleWsEvent(event) {
 
   switch (event.type) {
     case 'session.step': {
+      spinner.stop();
       if (streaming) { process.stdout.write('\n'); streaming = false; }
       console.log(`  ${fmt(C.dim, '›')} ${event.step}`);
+      spinner.start(event.step.slice(0, 50));  // resume with current step label
       break;
     }
     case 'session.token': {
+      spinner.stop();
       if (!streaming) { process.stdout.write('\n  '); streaming = true; }
       process.stdout.write(event.token);
       lineBuffer += event.token;
       break;
     }
     case 'session.completed': {
+      spinner.stop();
       if (streaming) { process.stdout.write('\n'); streaming = false; }
       const r = event.result ?? {};
       if (r.files_written?.length) console.log(`\n  ${fmt(C.green, '✓')} ${r.files_written.join(', ')}`);
@@ -126,6 +155,7 @@ function handleWsEvent(event) {
       break;
     }
     case 'session.failed': {
+      spinner.stop();
       if (streaming) { process.stdout.write('\n'); streaming = false; }
       console.log(`\n  ${fmt(C.red, '✗')} ${event.error}\n`);
       lineBuffer = '';
@@ -189,6 +219,7 @@ async function runTask(input) {
     });
     const s = await res.json();
     sessionId = s.session_id ?? s.id;
+    spinner.start('Thinking');  // show immediately after session created
     return new Promise(resolve => { pendingResolve = resolve; });
   } catch (e) {
     console.log(`  ${fmt(C.red, '✗')} ${e.message}`);
@@ -377,12 +408,18 @@ printInsights();
 // Connect WebSocket for live events
 connectWS();
 
-// Check if daemon is running
-fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(1500) })
-  .then(() => { rl.prompt(); })
-  .catch(async () => {
-    process.stdout.write(fmt(C.dim, '  Starting daemon'));
-    // Trigger auto-start via requireDaemon-equivalent
+// ── Startup: check daemon + LLM connection ──────────────────────────────────
+(async () => {
+  const startSpin = new Spinner('Starting daemon');
+
+  // Step 1: ensure daemon is running
+  let daemonOk = false;
+  try {
+    await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(1500) });
+    daemonOk = true;
+  } catch {
+    // Auto-start
+    startSpin.start();
     const { resolve: res, existsSync: ef } = await import('node:path').then(m => m);
     const pkgRoot = res(new URL(import.meta.url).pathname, '..', '..');
     const bundled = res(pkgRoot, 'dist', 'daemon.mjs');
@@ -392,14 +429,60 @@ fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(1500) })
       child.unref();
       for (let i = 0; i < 20; i++) {
         await new Promise(r => setTimeout(r, 500));
-        process.stdout.write(fmt(C.dim, '.'));
-        try { await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(500) }); process.stdout.write(fmt(C.green, ' ✓\n\n')); break; } catch {}
+        try { await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(500) }); daemonOk = true; break; } catch {}
       }
-    } else {
-      console.log(`\n  ${fmt(C.dim, 'Run: 0agent start')}\n`);
     }
-    rl.prompt();
-  });
+    startSpin.stop();
+    if (daemonOk) process.stdout.write(`  ${fmt(C.green, '✓')} Daemon ready\n`);
+    else { console.log(`  ${fmt(C.red, '✗')} Daemon failed. Run: 0agent start`); rl.prompt(); return; }
+  }
+
+  // Step 2: verify LLM is reachable with a quick "hello" check
+  const provider = getCurrentProvider(cfg);
+  if (provider?.api_key?.trim() || provider?.provider === 'ollama') {
+    const llmSpin = new Spinner(`Connecting to ${provider.provider}/${provider.model}`);
+    llmSpin.start();
+    try {
+      // Ask the daemon to run a minimal LLM ping via the session API
+      const res = await fetch(`${BASE_URL}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: 'Reply with exactly: ready', options: { max_steps: 1 } }),
+      });
+      const s = await res.json();
+      const sid = s.session_id ?? s.id;
+      // Poll briefly for completion
+      for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        const check = await fetch(`${BASE_URL}/api/sessions/${sid}`).then(r => r.json()).catch(() => null);
+        if (check?.status === 'completed') {
+          llmSpin.stop();
+          const model = check.result?.model ?? provider.model;
+          console.log(`  ${fmt(C.green, '✓')} LLM connected — ${fmt(C.cyan, model)}\n`);
+          break;
+        }
+        if (check?.status === 'failed') {
+          llmSpin.stop();
+          console.log(`  ${fmt(C.red, '✗')} LLM error: ${check.error}`);
+          console.log(`  ${fmt(C.dim, 'Check your API key with: /key ' + provider.provider)}\n`);
+          break;
+        }
+      }
+      if (llmSpin.active) {
+        llmSpin.stop();
+        console.log(`  ${fmt(C.yellow, '⚠')} LLM check timed out — it may still work\n`);
+      }
+    } catch {
+      llmSpin.stop();
+      console.log(`  ${fmt(C.yellow, '⚠')} Could not verify LLM connection\n`);
+    }
+  } else {
+    console.log(`  ${fmt(C.yellow, '⚠')} No API key set. Use: ${fmt(C.cyan, '/key ' + (provider?.provider ?? 'anthropic') + ' <your-key>')}\n`);
+  }
+
+  rl.prompt();
+})();
+
 
 rl.on('line', async (input) => {
   const line = input.trim();

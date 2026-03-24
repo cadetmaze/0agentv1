@@ -512,10 +512,12 @@ async function streamSession(sessionId) {
 
   return new Promise((resolve) => {
     const ws = new WS(`ws://localhost:4200/ws`);
-    let streaming = false;  // true when mid-token-stream
+    let streaming = false;
+    const spinner = new Spinner('Thinking');
 
     ws.on('open', () => {
       ws.send(JSON.stringify({ type: 'subscribe', topics: ['sessions'] }));
+      spinner.start();  // show immediately on connect
     });
 
     ws.on('message', async (data) => {
@@ -525,28 +527,31 @@ async function streamSession(sessionId) {
 
         switch (event.type) {
           case 'session.step':
-            // Newline before step if we were mid-stream
+            spinner.stop();
             if (streaming) { process.stdout.write('\n'); streaming = false; }
             console.log(`  \x1b[2m›\x1b[0m ${event.step}`);
+            spinner.start(event.step.slice(0, 50));  // show next spinner with current step
             break;
           case 'session.token':
-            // Token-by-token streaming — print without newline
+            spinner.stop();  // stop spinner before first token
             if (!streaming) { process.stdout.write('\n  '); streaming = true; }
             process.stdout.write(event.token);
             break;
           case 'session.completed': {
+            spinner.stop();
             if (streaming) { process.stdout.write('\n'); streaming = false; }
             const r = event.result ?? {};
             if (r.files_written?.length) console.log(`\n  \x1b[32m✓\x1b[0m Files: ${r.files_written.join(', ')}`);
             if (r.commands_run?.length) console.log(`  \x1b[32m✓\x1b[0m Commands run: ${r.commands_run.length}`);
             if (r.tokens_used) console.log(`  \x1b[2m${r.tokens_used} tokens · ${r.model}\x1b[0m`);
             console.log('\n  \x1b[32m✓ Done\x1b[0m\n');
-            await showResultPreview(r);   // confirm server/file actually exists
+            await showResultPreview(r);
             ws.close();
             resolve();
             break;
           }
           case 'session.failed':
+            spinner.stop();
             if (streaming) { process.stdout.write('\n'); streaming = false; }
             console.log(`\n  \x1b[31m✗ Failed:\x1b[0m ${event.error}\n`);
             ws.close();
@@ -557,7 +562,7 @@ async function streamSession(sessionId) {
     });
 
     ws.on('error', () => {
-      // WS not available — fall back to polling
+      spinner.stop();
       ws.close();
       pollSession(sessionId).then(resolve);
     });
@@ -569,31 +574,39 @@ async function streamSession(sessionId) {
 
 async function pollSession(sessionId) {
   let lastStepCount = 0;
+  const spinner = new Spinner('Thinking');
+  spinner.start();
+
   for (let i = 0; i < 300; i++) {
     await sleep(600);
     const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}`);
     const s = await res.json();
 
-    // Print any new steps since last poll
+    // Print new steps
     const steps = s.steps ?? [];
     for (let j = lastStepCount; j < steps.length; j++) {
-      console.log(`  › ${steps[j].description}`);
+      spinner.stop();
+      console.log(`  \x1b[2m›\x1b[0m ${steps[j].description}`);
+      spinner.start(steps[j].description.slice(0, 50));
     }
     lastStepCount = steps.length;
 
     if (s.status === 'completed') {
-      console.log('\n  ✓ Done\n');
+      spinner.stop();
+      console.log('\n  \x1b[32m✓ Done\x1b[0m\n');
       const out = s.result?.output ?? s.result;
       if (out && typeof out === 'string') console.log(`  ${out}\n`);
       await showResultPreview(s.result ?? {});
       return;
     }
     if (s.status === 'failed') {
-      console.log(`\n  ✗ Failed: ${s.error}\n`);
+      spinner.stop();
+      console.log(`\n  \x1b[31m✗ Failed:\x1b[0m ${s.error}\n`);
       return;
     }
   }
-  console.log('\n  Timed out waiting for session.\n');
+  spinner.stop();
+  console.log('\n  Timed out.\n');
 }
 
 // ─── Chat REPL ───────────────────────────────────────────────────────────
@@ -1311,19 +1324,20 @@ async function requireDaemon() {
     process.exit(1);
   }
 
-  process.stdout.write('  Starting daemon');
+  const startSpinner = new Spinner('Starting daemon');
+  startSpinner.start();
   await _startDaemonBackground();
 
   for (let i = 0; i < 24; i++) {
     await sleep(500);
-    process.stdout.write('.');
     if (await isDaemonRunning()) {
-      process.stdout.write(' ✓\n\n');
+      startSpinner.stop();
+      process.stdout.write('  \x1b[32m✓\x1b[0m Daemon ready\n\n');
       return;
     }
   }
-  process.stdout.write(' ✗\n');
-  console.log('  Daemon failed to start. Check: 0agent logs\n');
+  startSpinner.stop();
+  console.log('  \x1b[31m✗\x1b[0m Daemon failed to start. Check: 0agent logs\n');
   process.exit(1);
 }
 
@@ -1357,6 +1371,37 @@ async function importWS() {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// ─── Spinner — shows when agent is thinking/loading ───────────────────────────
+class Spinner {
+  constructor(msg = 'Thinking') {
+    this._msg = msg;
+    this._frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+    this._i = 0;
+    this._timer = null;
+    this._active = false;
+  }
+  start(msg) {
+    if (this._active) return;
+    if (msg) this._msg = msg;
+    this._active = true;
+    process.stdout.write('\n');
+    this._timer = setInterval(() => {
+      process.stdout.write(`\r  \x1b[36m${this._frames[this._i++ % this._frames.length]}\x1b[0m \x1b[2m${this._msg}\x1b[0m  `);
+    }, 80);
+  }
+  update(msg) {
+    this._msg = msg;
+  }
+  stop(clearIt = true) {
+    if (!this._active) return;
+    clearInterval(this._timer);
+    this._timer = null;
+    this._active = false;
+    if (clearIt) process.stdout.write('\r\x1b[2K');
+  }
+  get active() { return this._active; }
 }
 
 function ask(question) {
