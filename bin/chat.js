@@ -1002,51 +1002,55 @@ async function openPalette(initialFilter = '') {
 
   let filter  = initialFilter.toLowerCase();
   let idx     = 0;
-  let drawn   = 0; // number of lines we've printed so far
+  let scroll  = 0;  // top of the visible window
+  let drawn   = 0;
+  const PAGE  = 10; // visible rows at once
 
   const getItems = () => SLASH_COMMANDS.filter(c =>
     !filter || c.cmd.slice(1).startsWith(filter)
   );
 
   const paint = () => {
-    // Erase previous draw: move up `drawn` lines, clear everything below
     if (drawn > 0) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
 
-    const items  = getItems();
-    const show   = items.slice(0, 14);
-    if (idx >= items.length) idx = Math.max(0, items.length - 1);
+    const items = getItems();
+    if (items.length === 0) { idx = 0; scroll = 0; }
+    else {
+      idx = Math.max(0, Math.min(idx, items.length - 1));
+      // Keep selected item inside the visible window
+      if (idx < scroll)           scroll = idx;
+      if (idx >= scroll + PAGE)   scroll = idx - PAGE + 1;
+    }
 
+    const show  = items.slice(scroll, scroll + PAGE);
     const lines = [];
 
-    // Top border
     lines.push(`  \x1b[2m${'─'.repeat(58)}\x1b[0m`);
 
-    if (show.length === 0) {
+    if (items.length === 0) {
       lines.push(`  \x1b[2m  no commands match "/${filter}"\x1b[0m`);
     } else {
       for (let i = 0; i < show.length; i++) {
         const m   = show[i];
-        const sel = i === idx;
+        const sel = (scroll + i) === idx;
         if (sel) {
-          lines.push(
-            `  \x1b[36;1m›\x1b[0m \x1b[36;1m${m.cmd.padEnd(22)}\x1b[0m \x1b[0m${m.desc}\x1b[0m`
-          );
+          lines.push(`  \x1b[36;1m›\x1b[0m \x1b[36;1m${m.cmd.padEnd(22)}\x1b[0m ${m.desc}`);
         } else {
-          lines.push(
-            `    \x1b[36m${m.cmd.padEnd(22)}\x1b[0m \x1b[2m${m.desc}\x1b[0m`
-          );
+          lines.push(`    \x1b[36m${m.cmd.padEnd(22)}\x1b[0m \x1b[2m${m.desc}\x1b[0m`);
         }
       }
     }
 
-    if (items.length > 14) lines.push(`  \x1b[2m  …${items.length - 14} more\x1b[0m`);
+    // Scroll indicator
+    if (items.length > PAGE) {
+      const pct = Math.round(((scroll + PAGE / 2) / items.length) * 100);
+      lines.push(`  \x1b[2m  ${idx + 1} / ${items.length}  (${pct}%)\x1b[0m`);
+    }
 
-    // Bottom: search input line
     lines.push(`  \x1b[2m${'─'.repeat(58)}\x1b[0m`);
-    lines.push(`  ${fmt(C.cyan, '/')}${filter}\x1b[K  \x1b[2m↑↓ navigate · Enter select · Esc cancel\x1b[0m`);
+    lines.push(`  ${fmt(C.cyan, '/')}${filter}\x1b[K  \x1b[2m↑↓ scroll · Enter select · Esc cancel\x1b[0m`);
 
-    const out = lines.join('\n') + '\n';
-    process.stdout.write(out);
+    process.stdout.write(lines.join('\n') + '\n');
     drawn = lines.length;
   };
 
@@ -1069,11 +1073,11 @@ async function openPalette(initialFilter = '') {
         paint();
       } else if (s === '\x7f' || s === '\x08') { // Backspace
         filter = filter.slice(0, -1);
-        idx = 0;
+        idx = 0; scroll = 0;
         paint();
       } else if (/^[a-z0-9\-_]$/i.test(s)) {   // Printable letter/digit/hyphen
         filter += s.toLowerCase();
-        idx = 0;
+        idx = 0; scroll = 0;
         paint();
       }
     };
@@ -1410,17 +1414,19 @@ function isNewerVersion(a, b) {
 
 // ─── Message queue + serial executor ─────────────────────────────────────────
 
-const COMMAND_PREFIXES = ['/model','/key','/status','/skills','/graph','/clear','/help','/schedule','/update'];
+// Only these exact prefixes are built-in commands handled by handleCommand().
+// Everything else starting with '/' is a skill → routed to runTask().
+const COMMAND_PREFIXES = ['/model','/key','/status','/skills','/graph','/clear',
+  '/help','/schedule','/update','/telegram'];
 
 async function executeInput(line) {
-  const isCmd = line.startsWith('/') || COMMAND_PREFIXES.some(c => line.startsWith(c));
+  const isCmd = COMMAND_PREFIXES.some(c => line === c || line.startsWith(c + ' '));
   if (isCmd) {
     await handleCommand(line);
   } else {
     lastFailedTask = null;
     await runTask(line);
   }
-  // After this input completes, drain the queue
   await drainQueue();
 }
 
