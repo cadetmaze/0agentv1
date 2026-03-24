@@ -114,6 +114,7 @@ export class ZeroAgentDaemon {
       eventBus: this.eventBus,
       graph: this.graph,
       llm: llmExecutor,
+      cwd: process.env['ZEROAGENT_CWD'] ?? process.cwd(),
     });
 
     // 6. Create BackgroundWorkers, start them

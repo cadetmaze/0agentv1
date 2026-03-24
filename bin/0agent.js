@@ -415,6 +415,7 @@ async function streamSession(sessionId) {
 
   return new Promise((resolve) => {
     const ws = new WS(`ws://localhost:4200/ws`);
+    let streaming = false;  // true when mid-token-stream
 
     ws.on('open', () => {
       ws.send(JSON.stringify({ type: 'subscribe', topics: ['sessions'] }));
@@ -427,18 +428,30 @@ async function streamSession(sessionId) {
 
         switch (event.type) {
           case 'session.step':
-            console.log(`  › ${event.step}`);
+            // Newline before step if we were mid-stream
+            if (streaming) { process.stdout.write('\n'); streaming = false; }
+            console.log(`  \x1b[2m›\x1b[0m ${event.step}`);
+            break;
+          case 'session.token':
+            // Token-by-token streaming — print without newline
+            if (!streaming) { process.stdout.write('\n  '); streaming = true; }
+            process.stdout.write(event.token);
             break;
           case 'session.completed': {
-            console.log('\n  ✓ Done\n');
-            const out = event.result?.output ?? event.result;
-            if (out && typeof out === 'string') console.log(`  ${out}\n`);
+            if (streaming) { process.stdout.write('\n'); streaming = false; }
+            // Show files written + commands run
+            const r = event.result ?? {};
+            if (r.files_written?.length) console.log(`\n  \x1b[32m✓\x1b[0m Files: ${r.files_written.join(', ')}`);
+            if (r.commands_run?.length) console.log(`  \x1b[32m✓\x1b[0m Commands run: ${r.commands_run.length}`);
+            if (r.tokens_used) console.log(`  \x1b[2m${r.tokens_used} tokens · ${r.model}\x1b[0m`);
+            console.log('\n  \x1b[32m✓ Done\x1b[0m\n');
             ws.close();
             resolve();
             break;
           }
           case 'session.failed':
-            console.log(`\n  ✗ Failed: ${event.error}\n`);
+            if (streaming) { process.stdout.write('\n'); streaming = false; }
+            console.log(`\n  \x1b[31m✗ Failed:\x1b[0m ${event.error}\n`);
             ws.close();
             resolve();
             break;

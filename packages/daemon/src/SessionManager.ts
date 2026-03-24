@@ -15,6 +15,7 @@ import type {
 import type { IEventBus } from './WebSocketEvents.js';
 import { EntityScopedContextLoader } from './EntityScopedContext.js';
 import type { LLMExecutor } from './LLMExecutor.js';
+import { AgentExecutor } from './AgentExecutor.js';
 
 // ─── Types ───────────────────────────────────────────
 
@@ -55,6 +56,7 @@ export interface SessionManagerDeps {
   eventBus?: IEventBus;
   graph?: KnowledgeGraph;
   llm?: LLMExecutor;
+  cwd?: string;
 }
 
 // ─── SessionManager ──────────────────────────────────
@@ -65,12 +67,14 @@ export class SessionManager {
   private eventBus?: IEventBus;
   private graph?: KnowledgeGraph;
   private llm?: LLMExecutor;
+  private cwd: string;
 
   constructor(deps: SessionManagerDeps = {}) {
     this.inferenceEngine = deps.inferenceEngine;
     this.eventBus = deps.eventBus;
     this.graph = deps.graph;
     this.llm = deps.llm;
+    this.cwd = deps.cwd ?? process.cwd();
   }
 
   /**
@@ -273,37 +277,44 @@ export class SessionManager {
         this.addStep(session.id, 'No inference engine connected — executing task directly');
       }
 
-      // Step 5: call LLM to actually execute the task
-      this.addStep(session.id, 'Calling LLM…');
-      let output = '';
-
+      // Step 5: execute via AgentExecutor (real tool calling + streaming)
       if (this.llm?.isConfigured) {
-        try {
-          const systemPrompt = enrichedReq.context?.system_context
-            ? String(enrichedReq.context.system_context)
-            : `You are 0agent, a helpful AI assistant. Complete the user's task directly and concisely. If the task involves creating files, writing code, or running commands, provide the exact output needed.`;
+        const executor = new AgentExecutor(
+          this.llm,
+          { cwd: this.cwd },
+          // step callback → emit session.step events
+          (step) => this.addStep(session.id, step),
+          // token callback → emit session.token events
+          (token) => this.emit({ type: 'session.token', session_id: session.id, token }),
+        );
 
-          const llmRes = await this.llm.complete([
-            { role: 'user', content: enrichedReq.task },
-          ], systemPrompt);
+        const systemContext = enrichedReq.context?.system_context
+          ? String(enrichedReq.context.system_context)
+          : undefined;
 
-          output = llmRes.content;
-          this.addStep(session.id, `LLM responded (${llmRes.tokens_used} tokens, ${llmRes.model})`);
-        } catch (llmErr) {
-          const msg = llmErr instanceof Error ? llmErr.message : String(llmErr);
-          this.addStep(session.id, `LLM error: ${msg}`);
-          output = `Error calling LLM: ${msg}`;
+        const agentResult = await executor.execute(enrichedReq.task, systemContext);
+
+        // Final summary step
+        if (agentResult.files_written.length > 0) {
+          this.addStep(session.id, `Files written: ${agentResult.files_written.join(', ')}`);
         }
-      } else {
-        output = session.plan?.reasoning ?? 'No LLM configured — add API key to ~/.0agent/config.yaml';
-        this.addStep(session.id, 'No LLM configured (set api_key in ~/.0agent/config.yaml)');
-      }
+        if (agentResult.commands_run.length > 0) {
+          this.addStep(session.id, `Commands run: ${agentResult.commands_run.length}`);
+        }
+        this.addStep(session.id, `Done (${agentResult.tokens_used} tokens, ${agentResult.iterations} LLM turns)`);
 
-      this.completeSession(session.id, {
-        output,
-        plan: session.plan ?? null,
-        steps: session.steps.length,
-      });
+        this.completeSession(session.id, {
+          output: agentResult.output,
+          files_written: agentResult.files_written,
+          commands_run: agentResult.commands_run,
+          tokens_used: agentResult.tokens_used,
+          model: agentResult.model,
+        });
+      } else {
+        const output = session.plan?.reasoning ?? 'No LLM configured — add api_key to ~/.0agent/config.yaml';
+        this.addStep(session.id, 'No LLM API key configured');
+        this.completeSession(session.id, { output });
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       this.failSession(session.id, message);
