@@ -10,7 +10,9 @@ import type {
   TraceRecord,
   InferencePlan,
   IInferenceEngine,
+  SQLiteAdapter,
 } from '@0agent/core';
+import { WeightEventLog, EdgeWeightUpdater } from '@0agent/core';
 
 import type { IEventBus } from './WebSocketEvents.js';
 import { EntityScopedContextLoader } from './EntityScopedContext.js';
@@ -19,6 +21,7 @@ import { AgentExecutor } from './AgentExecutor.js';
 import { AnthropicSkillFetcher } from './AnthropicSkillFetcher.js';
 import type { UserIdentity } from './IdentityManager.js';
 import { ProjectScanner, type ProjectContext } from './ProjectScanner.js';
+import { ConversationStore } from './ConversationStore.js';
 
 // ─── Types ───────────────────────────────────────────
 
@@ -60,8 +63,9 @@ export interface SessionManagerDeps {
   graph?: KnowledgeGraph;
   llm?: LLMExecutor;
   cwd?: string;
-  identity?: UserIdentity;           // Collab-1: who is running sessions
-  projectContext?: ProjectContext;   // Collab-1: what project we're in
+  identity?: UserIdentity;              // Collab-1: who is running sessions
+  projectContext?: ProjectContext;      // Collab-1: what project we're in
+  adapter?: SQLiteAdapter;             // for ConversationStore + WeightEventLog
 }
 
 // ─── SessionManager ──────────────────────────────────
@@ -75,6 +79,8 @@ export class SessionManager {
   private cwd: string;
   private identity?: UserIdentity;
   private projectContext?: ProjectContext;
+  private conversationStore?: ConversationStore;
+  private weightUpdater?: EdgeWeightUpdater;
   private anthropicFetcher = new AnthropicSkillFetcher();
 
   constructor(deps: SessionManagerDeps = {}) {
@@ -85,6 +91,16 @@ export class SessionManager {
     this.cwd = deps.cwd ?? process.cwd();
     this.identity = deps.identity;
     this.projectContext = deps.projectContext;
+
+    if (deps.adapter) {
+      // Conversation history — so "make it dark mode" knows what "it" is
+      this.conversationStore = new ConversationStore(deps.adapter);
+      this.conversationStore.init();
+
+      // Outcome→weight feedback — so the graph actually learns from real tasks
+      const wLog = new WeightEventLog(deps.adapter);
+      this.weightUpdater = new EdgeWeightUpdater(deps.adapter, wLog);
+    }
   }
 
   /**
@@ -316,9 +332,24 @@ export class SessionManager {
         const projectCtx = this.projectContext
           ? ProjectScanner.buildContextPrompt(this.projectContext)
           : undefined;
+
+        // Conversation history — the key to "make it dark mode" understanding "it"
+        const userEntityId = enrichedReq.entity_id ?? this.identity?.entity_node_id;
+        let conversationHistory: string | undefined;
+        if (this.conversationStore && userEntityId) {
+          const history = this.conversationStore.buildContextMessages(userEntityId, 8);
+          if (history.length > 0) {
+            const historyStr = history
+              .map(m => `${m.role === 'user' ? 'User' : 'Agent'}: ${m.content.slice(0, 400)}`)
+              .join('\n');
+            conversationHistory = `CONVERSATION HISTORY (use this for context on follow-up requests):\n${historyStr}\n\nCurrent task:`;
+          }
+        }
+
         const systemContext = [
           identityContext,
           projectCtx,
+          conversationHistory,
           anthropicContext,
           enrichedReq.context?.system_context
             ? String(enrichedReq.context.system_context)
@@ -339,6 +370,48 @@ export class SessionManager {
         } catch {
           // SelfHealLoop not yet available — use bare executor
           agentResult = await executor.execute(enrichedReq.task, systemContext);
+        }
+
+        // ── Store conversation exchange (makes follow-up requests work) ──────
+        if (this.conversationStore && userEntityId) {
+          const sessionId = session.id;
+          const now = Date.now();
+          this.conversationStore.append({
+            id: crypto.randomUUID(),
+            session_id: sessionId,
+            user_entity_id: userEntityId,
+            role: 'user',
+            content: enrichedReq.task,
+            created_at: now,
+          });
+          this.conversationStore.append({
+            id: crypto.randomUUID(),
+            session_id: sessionId,
+            user_entity_id: userEntityId,
+            role: 'assistant',
+            content: agentResult.output.slice(0, 1000), // cap stored output length
+            created_at: now + 1,
+          });
+        }
+
+        // ── Outcome → weight feedback (graph learns from real task outcomes) ──
+        const selectedEdgeId = session.plan?.selected_edge?.edge_id;
+        if (selectedEdgeId && this.weightUpdater && this.graph) {
+          const outcomeSignal = this.computeOutcomeSignal(agentResult as unknown as Record<string, unknown>);
+          if (outcomeSignal !== 0) {
+            const edge = this.graph.getEdge(selectedEdgeId);
+            if (edge && !edge.locked) {
+              const newWeight = Math.max(0.0, Math.min(1.0,
+                edge.weight + outcomeSignal * 0.1  // learning rate 0.1
+              ));
+              await this.weightUpdater.update(
+                edge.id, edge.weight, newWeight,
+                outcomeSignal > 0 ? 'task_outcome_positive' : 'task_outcome_negative',
+                session.id
+              );
+              this.emit({ type: 'graph.weight_updated', edge_id: edge.id, old_weight: edge.weight, new_weight: newWeight });
+            }
+          }
         }
 
         // Final summary step
@@ -396,4 +469,26 @@ export class SessionManager {
       this.eventBus.emit(event);
     }
   }
+
+  /**
+   * Convert a task result into a weight signal for the knowledge graph.
+   *
+   * Signal scale: -0.3 (failed after retries) to +0.3 (verified success first try).
+   * Neutral (0) when no verification was possible — don't penalise unverifiable tasks.
+   */
+  private computeOutcomeSignal(result: Record<string, unknown>): number {
+    const healAttempts = result['heal_attempts'] as Array<Record<string, unknown>> | undefined;
+    if (!healAttempts || healAttempts.length === 0) return 0;
+
+    const last = healAttempts[healAttempts.length - 1];
+    const verification = last?.['verification'] as Record<string, unknown> | undefined;
+    if (!verification || verification['method'] === 'none') return 0;
+
+    const success = verification['success'] === true;
+    const healed = result['healed'] === true; // succeeded only after retry
+
+    if (success) return healed ? 0.1 : 0.3;  // retry = partial credit
+    return -0.2;                               // all attempts failed
+  }
 }
+

@@ -143,6 +143,7 @@ export class ZeroAgentDaemon {
       cwd,
       identity: identity ?? undefined,
       projectContext: projectContext ?? undefined,
+      adapter: this.adapter,   // enables ConversationStore + weight feedback
     });
 
     // 6.5 — Collab-3: team sync worker (only if member of teams)
