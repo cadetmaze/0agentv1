@@ -36,13 +36,11 @@ export class GUICapability implements Capability {
   readonly toolDefinition: ToolDefinition = {
     name: 'gui_automation',
     description:
-      'Automate desktop GUI interactions. ' +
-      'Take screenshots to see the current screen state, click on buttons/links/fields, ' +
-      'type text, press keyboard shortcuts, scroll, open apps. ' +
-      'IMPORTANT: Limit screenshots to at most 3 per task — avoid re-screenshotting if you already know the layout. ' +
-      'Prefer targeted actions (click, find_and_click, hotkey) over repeated screenshots. ' +
-      'Use get_cursor_pos to check cursor position without a full screenshot. ' +
-      'To open a website, ALWAYS use action="open_url" — never open_app + new tab, which creates duplicate windows.',
+      'Desktop GUI automation — ONLY use for tasks that explicitly require controlling the screen. ' +
+      'DO NOT use for coding, research, file edits, or any task that does not need the desktop UI. ' +
+      'Actions: click, type, hotkey, scroll, find_and_click, open_url, open_app. ' +
+      'screenshot: use sparingly — only when you cannot proceed without seeing the current screen. Max 2 per task. ' +
+      'To open a website use open_url (reuses existing browser tab, never opens duplicate windows).',
     input_schema: {
       type: 'object',
       properties: {
