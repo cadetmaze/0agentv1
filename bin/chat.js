@@ -1206,24 +1206,36 @@ connectWS();
 
 // ── Startup: ensure fresh daemon + verify LLM ────────────────────────────────
 async function _spawnDaemon() {
-  const pkgRoot = resolve(new URL(import.meta.url).pathname, '..', '..');
+  const pkgRoot  = resolve(new URL(import.meta.url).pathname, '..', '..');
   const bundled  = resolve(pkgRoot, 'dist', 'daemon.mjs');
-  if (!existsSync(bundled) || !existsSync(CONFIG_PATH)) return false;
+  const devPath  = resolve(pkgRoot, 'packages', 'daemon', 'dist', 'start.js');
+  const daemonScript = existsSync(bundled) ? bundled : existsSync(devPath) ? devPath : null;
+
+  if (!daemonScript) return 'no-bundle';
+  if (!existsSync(CONFIG_PATH)) return 'no-config';
+
   const { spawn } = await import('node:child_process');
-  const child = spawn(process.execPath, [bundled], {
-    detached: true, stdio: 'ignore',
+  const { openSync: fsOpen, mkdirSync: fsMkdir } = await import('node:fs');
+  const logDir = resolve(AGENT_DIR, 'logs');
+  fsMkdir(logDir, { recursive: true });
+  const logFd = fsOpen(resolve(logDir, 'daemon.log'), 'w');
+
+  const child = spawn(process.execPath, [daemonScript], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
     env: { ...process.env, ZEROAGENT_CONFIG: CONFIG_PATH },
   });
   child.unref();
+
   // Wait up to 10s for daemon to be ready
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 500));
     try {
       await fetch(`${BASE_URL}/api/health`, { signal: AbortSignal.timeout(500) });
-      return true;
+      return 'ok';
     } catch {}
   }
-  return false;
+  return 'timeout';
 }
 
 async function _safeJsonFetch(url, opts) {
@@ -1256,23 +1268,32 @@ async function _safeJsonFetch(url, opts) {
     // Daemon not running at all
   }
 
+  let spawnResult = 'ok';
   if (needsRestart) {
     startSpin.start('Restarting daemon (new version)');
-    // Kill old daemon
     try {
       const { execSync } = await import('node:child_process');
       execSync('pkill -f "daemon.mjs" 2>/dev/null; true', { stdio: 'ignore' });
     } catch {}
     await new Promise(r => setTimeout(r, 800));
-    daemonOk = await _spawnDaemon();
+    spawnResult = await _spawnDaemon();
+    daemonOk = spawnResult === 'ok';
   } else if (!daemonOk) {
     startSpin.start('Starting daemon');
-    daemonOk = await _spawnDaemon();
+    spawnResult = await _spawnDaemon();
+    daemonOk = spawnResult === 'ok';
   }
 
   startSpin.stop();
   if (!daemonOk) {
-    console.log(`  ${fmt(C.red, '✗')} Daemon failed to start. Run: 0agent start`);
+    if (spawnResult === 'no-config') {
+      console.log(`  ${fmt(C.yellow, '!')} Not configured yet. Run: ${fmt(C.bold, '0agent init')}`);
+    } else if (spawnResult === 'no-bundle') {
+      console.log(`  ${fmt(C.red, '✗')} Daemon bundle missing. Reinstall: ${fmt(C.bold, 'npm i -g 0agent@latest')}`);
+    } else {
+      const logPath = resolve(AGENT_DIR, 'logs', 'daemon.log');
+      console.log(`  ${fmt(C.red, '✗')} Daemon failed to start. Check logs: ${fmt(C.dim, logPath)}`);
+    }
     rl.prompt();
     return;
   }

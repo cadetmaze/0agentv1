@@ -19,7 +19,7 @@
  *   0agent improve             # self-improvement analysis
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { spawn, execSync } from 'node:child_process';
@@ -431,10 +431,10 @@ async function startDaemon() {
 
   mkdirSync(resolve(AGENT_DIR, 'logs'), { recursive: true });
 
-  const logFile = writeFileSync(LOG_PATH, '', 'utf8');
+  const logFd = openSync(LOG_PATH, 'w');
   const child = spawn(process.execPath, [startScript], {
     detached: true,
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ['ignore', logFd, logFd],
     env: { ...process.env, ZEROAGENT_CONFIG: CONFIG_PATH },
   });
   child.unref();
