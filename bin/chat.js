@@ -7,7 +7,7 @@
  * /model to switch. /key to add provider keys. Never forgets previous keys.
  */
 
-import { createInterface, emitKeypressEvents, moveCursor, clearLine as rlClearLine } from 'node:readline';
+import { createInterface, emitKeypressEvents } from 'node:readline';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -836,61 +836,114 @@ async function handleCommand(input) {
   }
 }
 
-// ─── Live slash-command menu ──────────────────────────────────────────────────
-// Drawn below the prompt as the user types. Uses moveCursor to avoid cursor
-// save/restore conflicts with readline.
-let _menuLines = 0; // how many lines the current menu occupies below the cursor
+// ─── Command palette ──────────────────────────────────────────────────────────
+// Fully takes over stdin when open. No cursor tricks — pauses readline,
+// reads raw bytes directly, draws with \x1b[NA\x1b[0J (up + clear-to-end).
+// Returns the selected command string, or null if cancelled.
 
-function _drawMenu(filter) {
-  if (pendingResolve) { _clearMenu(); return; } // don't show while session running
+let _paletteOpen = false;
 
-  const items = filter === null ? [] :
-    SLASH_COMMANDS.filter(c =>
-      !filter || c.cmd.slice(1).toLowerCase().startsWith(filter.toLowerCase())
-    ).slice(0, 10);
+async function openPalette(initialFilter = '') {
+  if (_paletteOpen || pendingResolve) return null;
+  _paletteOpen = true;
 
-  // If nothing changed (same count), skip redraw to avoid flicker
-  if (items.length === 0) { _clearMenu(); return; }
+  // Pause readline so it stops consuming stdin events
+  rl.pause();
+  // Resume the raw stream so our data handler receives bytes
+  process.stdin.resume();
+  if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-  const needed = items.length + 1; // +1 for blank line
+  let filter  = initialFilter.toLowerCase();
+  let idx     = 0;
+  let drawn   = 0; // number of lines we've printed so far
 
-  // Move down past existing menu lines (or 0), then clear downward
-  const existingLines = _menuLines;
-  if (existingLines > 0) {
-    moveCursor(process.stdout, 0, existingLines);
-    for (let i = 0; i < existingLines; i++) {
-      rlClearLine(process.stdout, 0);
-      if (i < existingLines - 1) moveCursor(process.stdout, 0, -1);
+  const getItems = () => SLASH_COMMANDS.filter(c =>
+    !filter || c.cmd.slice(1).startsWith(filter)
+  );
+
+  const paint = () => {
+    // Erase previous draw: move up `drawn` lines, clear everything below
+    if (drawn > 0) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
+
+    const items  = getItems();
+    const show   = items.slice(0, 14);
+    if (idx >= items.length) idx = Math.max(0, items.length - 1);
+
+    const lines = [];
+
+    // Top border
+    lines.push(`  \x1b[2m${'─'.repeat(58)}\x1b[0m`);
+
+    if (show.length === 0) {
+      lines.push(`  \x1b[2m  no commands match "/${filter}"\x1b[0m`);
+    } else {
+      for (let i = 0; i < show.length; i++) {
+        const m   = show[i];
+        const sel = i === idx;
+        if (sel) {
+          lines.push(
+            `  \x1b[36;1m›\x1b[0m \x1b[36;1m${m.cmd.padEnd(22)}\x1b[0m \x1b[0m${m.desc}\x1b[0m`
+          );
+        } else {
+          lines.push(
+            `    \x1b[36m${m.cmd.padEnd(22)}\x1b[0m \x1b[2m${m.desc}\x1b[0m`
+          );
+        }
+      }
     }
-    moveCursor(process.stdout, 0, -(existingLines - 1));
-  }
 
-  // Print blank separator + menu items, tracking column 0
-  process.stdout.write('\n');
-  for (const m of items) {
-    process.stdout.write(
-      `  ${fmt(C.cyan, m.cmd.padEnd(20))} ${fmt(C.dim, m.desc)}\x1b[K\n`
-    );
-  }
+    if (items.length > 14) lines.push(`  \x1b[2m  …${items.length - 14} more\x1b[0m`);
 
-  // Move back up to the prompt line and restore cursor after the typed text
-  moveCursor(process.stdout, 0, -(needed));
-  // Jump to end of current line (readline already put cursor there)
-  moveCursor(process.stdout, 999, 0);
+    // Bottom: search input line
+    lines.push(`  \x1b[2m${'─'.repeat(58)}\x1b[0m`);
+    lines.push(`  ${fmt(C.cyan, '/')}${filter}\x1b[K  \x1b[2m↑↓ navigate · Enter select · Esc cancel\x1b[0m`);
 
-  _menuLines = needed;
-}
+    const out = lines.join('\n') + '\n';
+    process.stdout.write(out);
+    drawn = lines.length;
+  };
 
-function _clearMenu() {
-  if (_menuLines === 0) return;
-  const n = _menuLines;
-  _menuLines = 0;
-  moveCursor(process.stdout, 0, n);
-  for (let i = 0; i < n; i++) {
-    rlClearLine(process.stdout, 0);
-    moveCursor(process.stdout, 0, -1);
-  }
-  moveCursor(process.stdout, 0, 1); // back to prompt line
+  paint();
+
+  return new Promise((resolve) => {
+    const onData = (chunk) => {
+      const s = chunk.toString();
+
+      if (s === '\r' || s === '\n') {           // Enter — select
+        const sel = getItems()[idx]?.cmd ?? null;
+        finish(sel);
+      } else if (s === '\x1b' || s === '\x03') { // Esc / Ctrl-C — cancel
+        finish(null);
+      } else if (s === '\x1b[A') {              // Up arrow
+        idx = Math.max(0, idx - 1);
+        paint();
+      } else if (s === '\x1b[B') {              // Down arrow
+        idx = Math.min(getItems().length - 1, idx + 1);
+        paint();
+      } else if (s === '\x7f' || s === '\x08') { // Backspace
+        filter = filter.slice(0, -1);
+        idx = 0;
+        paint();
+      } else if (/^[a-z0-9\-_]$/i.test(s)) {   // Printable letter/digit/hyphen
+        filter += s.toLowerCase();
+        idx = 0;
+        paint();
+      }
+    };
+
+    const finish = (selected) => {
+      process.stdin.removeListener('data', onData);
+      // Erase the palette
+      if (drawn > 0) process.stdout.write(`\x1b[${drawn}A\x1b[0J`);
+      drawn = 0;
+      _paletteOpen = false;
+      // Hand control back to readline
+      rl.resume();
+      resolve(selected);
+    };
+
+    process.stdin.on('data', onData);
+  });
 }
 
 // ─── Main REPL ────────────────────────────────────────────────────────────────
@@ -902,50 +955,31 @@ const rl = createInterface({
   completer: (line, callback) => {
     if (!line.startsWith('/')) return callback(null, [[], line]);
 
-    const filter = line.slice(1).toLowerCase();
-    const matches = SLASH_COMMANDS.filter(c =>
-      !filter || c.cmd.slice(1).startsWith(filter)
-    );
+    const filter  = line.slice(1).toLowerCase();
+    const matches = SLASH_COMMANDS.filter(c => !filter || c.cmd.slice(1).startsWith(filter));
 
-    if (matches.length === 0) return callback(null, [[], line]);
+    // Single exact match — let readline silently auto-complete
+    if (matches.length === 1) return callback(null, [[matches[0].cmd + ' '], line]);
 
-    // Single match — let readline silently auto-complete
-    if (matches.length === 1) {
-      _clearMenu();
-      return callback(null, [[matches[0].cmd + ' '], line]);
-    }
-
-    // Multiple matches — print formatted menu, suppress readline's plain list
-    _clearMenu();
-    process.stdout.write('\n\n');
-    for (const m of matches.slice(0, 12)) {
-      process.stdout.write(`  ${fmt(C.cyan, m.cmd.padEnd(22))} ${fmt(C.dim, m.desc)}\n`);
-    }
-    if (matches.length > 12) {
-      process.stdout.write(`  ${fmt(C.dim, `…and ${matches.length - 12} more`)}\n`);
-    }
-    process.stdout.write('\n');
-    setImmediate(() => rl.prompt(true));
+    // Multiple (or bare /) — open interactive palette
+    // Schedule after this tick so readline finishes its Tab handling first
+    setImmediate(async () => {
+      // Clear the typed fragment from the prompt line before opening palette
+      process.stdout.write('\r\x1b[2K');
+      const selected = await openPalette(filter);
+      if (selected) {
+        await executeInput(selected);
+      } else {
+        rl.prompt();
+      }
+    });
     return callback(null, [[], line]);
   },
 });
 
-// Live menu on keypress — draws below the prompt as user types
+// Trigger palette when user types exactly '/' and presses Tab or Enter isn't needed —
+// the completer above handles Tab. For bare '/' + Enter, handled in rl.on('line') below.
 emitKeypressEvents(process.stdin, rl);
-process.stdin.on('keypress', (_char, key) => {
-  if (key?.name === 'return' || key?.name === 'enter') {
-    _clearMenu(); // clear before readline processes the line
-    return;
-  }
-  setImmediate(() => {
-    const line = rl.line ?? '';
-    if (line.startsWith('/') && !pendingResolve) {
-      _drawMenu(line.slice(1));
-    } else {
-      _clearMenu();
-    }
-  });
-});
 
 printHeader();
 printInsights();
@@ -1253,19 +1287,21 @@ async function drainQueue() {
 }
 
 rl.on('line', async (input) => {
-  _clearMenu(); // always clear menu when a line is submitted
   const line = input.trim();
   if (!line) { rl.prompt(); return; }
 
-  // Bare `/` → show full command palette
-  if (line === '/') {
-    console.log('');
-    for (const m of SLASH_COMMANDS) {
-      console.log(`  ${fmt(C.cyan, m.cmd.padEnd(22))} ${fmt(C.dim, m.desc)}`);
+  // Bare `/` or partial `/cmd` with no session running → open interactive palette
+  if (line.startsWith('/') && !pendingResolve) {
+    const filter = line === '/' ? '' : line.slice(1);
+    const exact  = SLASH_COMMANDS.find(c => c.cmd === line);
+    if (!exact) {
+      // Clear the echoed input line before opening palette
+      process.stdout.write('\x1b[1A\r\x1b[2K');
+      const selected = await openPalette(filter);
+      if (selected) await executeInput(selected);
+      else rl.prompt();
+      return;
     }
-    console.log('');
-    rl.prompt();
-    return;
   }
 
   // If a session is already running, queue the message.
