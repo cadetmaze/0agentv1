@@ -37,6 +37,10 @@ import { BackgroundWorkers } from './BackgroundWorkers.js';
 import { SkillRegistry } from './SkillRegistry.js';
 import { HTTPServer } from './HTTPServer.js';
 import { LLMExecutor } from './LLMExecutor.js';
+import { IdentityManager } from './IdentityManager.js';
+import { ProjectScanner } from './ProjectScanner.js';
+import { TeamManager } from './TeamManager.js';
+import { TeamSync } from './TeamSync.js';
 import type { DaemonStatus } from './routes/health.js';
 
 // ─── Types ───────────────────────────────────────────
@@ -107,6 +111,28 @@ export class ZeroAgentDaemon {
       console.warn('[0agent] No LLM API key configured — tasks will not call the LLM');
     }
 
+    // 5.5 — Collab-1: initialize user identity + project context
+    const cwd = process.env['ZEROAGENT_CWD'] ?? process.cwd();
+    const identityManager = new IdentityManager(this.graph);
+    const identity = await identityManager.init().catch(() => null);
+    if (identity) {
+      console.log(`[0agent] Identity: ${identity.name} (${identity.device_id})`);
+    }
+
+    const projectScanner = new ProjectScanner(cwd);
+    // Run project scan in background — non-blocking, cached for session lifetime
+    const projectContext = await projectScanner.scan().catch(() => null);
+    if (projectContext?.stack?.length) {
+      console.log(`[0agent] Project: ${projectContext.name || '(unnamed)'} [${projectContext.stack.join(', ')}]`);
+    }
+
+    // 5.6 — Collab-3: initialize team manager + sync
+    const teamManager = new TeamManager();
+    const teams = teamManager.getMemberships();
+    if (teams.length > 0) {
+      console.log(`[0agent] Teams: ${teams.map(t => t.team_name).join(', ')}`);
+    }
+
     // 6. Create SessionManager
     this.eventBus = new WebSocketEventBus();
     this.sessionManager = new SessionManager({
@@ -114,13 +140,31 @@ export class ZeroAgentDaemon {
       eventBus: this.eventBus,
       graph: this.graph,
       llm: llmExecutor,
-      cwd: process.env['ZEROAGENT_CWD'] ?? process.cwd(),
+      cwd,
+      identity: identity ?? undefined,
+      projectContext: projectContext ?? undefined,
     });
 
-    // 6. Create BackgroundWorkers, start them
+    // 6.5 — Collab-3: team sync worker (only if member of teams)
+    const teamSync = identity && teams.length > 0
+      ? new TeamSync(teamManager, this.adapter, identity.entity_node_id)
+      : null;
+
+    // 6.6 — Collab-2: ProactiveSurface loaded lazily (file may not exist yet)
+    let proactiveSurface = null;
+    try {
+      const { ProactiveSurface } = await import('./ProactiveSurface.js');
+      proactiveSurface = new ProactiveSurface(this.graph, this.eventBus, cwd);
+    } catch {
+      // Collab-2 not yet built — skip silently
+    }
+
+    // 7. Create BackgroundWorkers, start them
     this.backgroundWorkers = new BackgroundWorkers({
       graph: this.graph,
       traceStore: this.traceStore,
+      ...(proactiveSurface ? { proactiveSurface } : {}),
+      ...(teamSync ? { teamSync } : {}),
     });
     this.backgroundWorkers.start();
 

@@ -26,11 +26,18 @@ export interface WorkerStatus {
   last_run_at: number | null;
 }
 
+// Forward-declared interface so BackgroundWorkers doesn't need to import the full
+// ProactiveSurface / TeamSync classes at module load time. The actual objects are
+// duck-typed — just start() / stop() is required.
+export interface Startable { start(): void; stop(): void; }
+
 export interface BackgroundWorkersDeps {
   graph?: KnowledgeGraph;
   decayScheduler?: DecayScheduler;
   traceStore?: TraceStore;
   config?: Partial<BackgroundWorkersConfig>;
+  proactiveSurface?: Startable;  // Collab-2: ProactiveSurface instance
+  teamSync?: Startable;           // Collab-3: TeamSync instance
 }
 
 const DEFAULT_CONFIG: BackgroundWorkersConfig = {
@@ -47,6 +54,8 @@ export class BackgroundWorkers {
   private decayScheduler?: DecayScheduler;
   private traceStore?: TraceStore;
   private config: BackgroundWorkersConfig;
+  private proactiveSurface?: Startable;
+  private teamSync?: Startable;
 
   private timers: Map<string, ReturnType<typeof setInterval>> = new Map();
   private lastRunTimes: Map<string, number> = new Map();
@@ -57,6 +66,8 @@ export class BackgroundWorkers {
     this.decayScheduler = deps.decayScheduler;
     this.traceStore = deps.traceStore;
     this.config = { ...DEFAULT_CONFIG, ...deps.config };
+    this.proactiveSurface = deps.proactiveSurface;
+    this.teamSync = deps.teamSync;
   }
 
   /**
@@ -104,10 +115,21 @@ export class BackgroundWorkers {
     // Enrichment stub (Phase 4)
     {
       const timer = setInterval(() => {
-        console.log('[BackgroundWorkers] enrichment not yet implemented');
         this.lastRunTimes.set('enrichment', Date.now());
       }, this.config.enrichment_interval_ms);
       this.timers.set('enrichment', timer);
+    }
+
+    // Proactive surface (Collab-2) — watches git + test output for insights
+    if (this.proactiveSurface) {
+      this.proactiveSurface.start();
+      this.lastRunTimes.set('proactive_surface', Date.now());
+    }
+
+    // Team sync (Collab-3) — syncs weight events with team server every 30s
+    if (this.teamSync) {
+      this.teamSync.start();
+      this.lastRunTimes.set('team_sync', Date.now());
     }
   }
 
@@ -119,6 +141,8 @@ export class BackgroundWorkers {
       clearInterval(timer);
     }
     this.timers.clear();
+    this.proactiveSurface?.stop();
+    this.teamSync?.stop();
     this.running = false;
   }
 
@@ -133,7 +157,7 @@ export class BackgroundWorkers {
    * Get status of all registered workers.
    */
   getWorkerStatus(): WorkerStatus[] {
-    const workerNames = ['decay', 'deferred_traces', 'compactor', 'enrichment'];
+    const workerNames = ['decay', 'deferred_traces', 'compactor', 'enrichment', 'proactive_surface', 'team_sync'];
     return workerNames.map((name) => ({
       name,
       active: this.timers.has(name),

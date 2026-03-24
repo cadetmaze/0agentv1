@@ -19,7 +19,17 @@ export type DaemonEvent =
   | { type: 'subagent.spawned'; subagent_id: string; tools: string[] }
   | { type: 'subagent.completed'; subagent_id: string; duration_ms: number }
   | { type: 'graph.weight_updated'; edge_id: string; old_weight: number; new_weight: number }
-  | { type: 'daemon.stats'; graph_nodes: number; active_sessions: number };
+  | { type: 'daemon.stats'; graph_nodes: number; active_sessions: number }
+  // ─── Collab-2: execution quality ───────────────────────────────────────
+  | { type: 'session.token'; session_id: string; token: string }
+  | { type: 'session.verify'; session_id: string; method: string; success: boolean; details: string }
+  | { type: 'session.heal_attempt'; session_id: string; attempt: number; error_context: string }
+  | { type: 'session.verified'; session_id: string; method: string; elapsed_ms: number }
+  | { type: 'agent.insight'; insight: Record<string, unknown> }
+  // ─── Collab-3: team sync ───────────────────────────────────────────────
+  | { type: 'team.synced'; team_id: string; deltas_pushed: number; deltas_pulled: number }
+  | { type: 'team.member_joined'; team_id: string; member_name: string }
+  | { type: 'team.member_left'; team_id: string; member_name: string };
 
 export type EventHandler = (event: DaemonEvent) => void;
 

@@ -17,6 +17,8 @@ import { EntityScopedContextLoader } from './EntityScopedContext.js';
 import type { LLMExecutor } from './LLMExecutor.js';
 import { AgentExecutor } from './AgentExecutor.js';
 import { AnthropicSkillFetcher } from './AnthropicSkillFetcher.js';
+import type { UserIdentity } from './IdentityManager.js';
+import { ProjectScanner, type ProjectContext } from './ProjectScanner.js';
 
 // ─── Types ───────────────────────────────────────────
 
@@ -58,6 +60,8 @@ export interface SessionManagerDeps {
   graph?: KnowledgeGraph;
   llm?: LLMExecutor;
   cwd?: string;
+  identity?: UserIdentity;           // Collab-1: who is running sessions
+  projectContext?: ProjectContext;   // Collab-1: what project we're in
 }
 
 // ─── SessionManager ──────────────────────────────────
@@ -69,6 +73,8 @@ export class SessionManager {
   private graph?: KnowledgeGraph;
   private llm?: LLMExecutor;
   private cwd: string;
+  private identity?: UserIdentity;
+  private projectContext?: ProjectContext;
   private anthropicFetcher = new AnthropicSkillFetcher();
 
   constructor(deps: SessionManagerDeps = {}) {
@@ -77,6 +83,8 @@ export class SessionManager {
     this.graph = deps.graph;
     this.llm = deps.llm;
     this.cwd = deps.cwd ?? process.cwd();
+    this.identity = deps.identity;
+    this.projectContext = deps.projectContext;
   }
 
   /**
@@ -301,15 +309,37 @@ export class SessionManager {
           (token) => this.emit({ type: 'session.token', session_id: session.id, token }),
         );
 
-        // Merge: Anthropic skill instructions + entity personality + any user context
+        // Merge all context layers (Collab-1 identity + project + Anthropic skill + entity personality)
+        const identityContext = this.identity
+          ? `You are talking to ${this.identity.name} (device: ${this.identity.device_id}, timezone: ${this.identity.timezone}).`
+          : undefined;
+        const projectCtx = this.projectContext
+          ? ProjectScanner.buildContextPrompt(this.projectContext)
+          : undefined;
         const systemContext = [
+          identityContext,
+          projectCtx,
           anthropicContext,
           enrichedReq.context?.system_context
             ? String(enrichedReq.context.system_context)
             : undefined,
         ].filter(Boolean).join('\n\n') || undefined;
 
-        const agentResult = await executor.execute(enrichedReq.task, systemContext);
+        // Use SelfHealLoop if available (Collab-2), otherwise bare executor
+        let agentResult: Awaited<ReturnType<typeof executor.execute>>;
+        try {
+          const { SelfHealLoop } = await import('./SelfHealLoop.js');
+          const healLoop = new SelfHealLoop(
+            this.llm,
+            { cwd: this.cwd },
+            (step) => this.addStep(session.id, step),
+            (token) => this.emit({ type: 'session.token', session_id: session.id, token }),
+          );
+          agentResult = await healLoop.executeWithHealing(enrichedReq.task, systemContext);
+        } catch {
+          // SelfHealLoop not yet available — use bare executor
+          agentResult = await executor.execute(enrichedReq.task, systemContext);
+        }
 
         // Final summary step
         if (agentResult.files_written.length > 0) {
