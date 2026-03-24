@@ -354,8 +354,23 @@ async function runTask(input) {
     // Catches completion when WS is disconnected (e.g. daemon just restarted).
     let lastPolledStep = 0;
     const sid = sessionId;
+    const sessionStart = Date.now();
     const pollTimer = setInterval(async () => {
       if (!pendingResolve || sessionId !== sid) { clearInterval(pollTimer); return; }
+
+      // Hard cap: if session runs for > 2 minutes, force-unblock the chat.
+      // The daemon session may still run in background, but the user gets their prompt back.
+      if (Date.now() - sessionStart > 120_000) {
+        clearInterval(pollTimer);
+        spinner.stop();
+        console.log(`\n  \x1b[33m⚠\x1b[0m Session still running in background (> 2min). Chat unblocked.\n`);
+        const res = pendingResolve;
+        pendingResolve = null;
+        sessionId = null;
+        res();
+        rl.prompt();
+        return;
+      }
       try {
         const r = await fetch(`${BASE_URL}/api/sessions/${sid}`, { signal: AbortSignal.timeout(2000) });
         const session = await r.json();
@@ -391,7 +406,7 @@ async function runTask(input) {
           rl.prompt();
         }
       } catch {}
-    }, 1500);
+    }, 800);
 
     return new Promise(resolve => { pendingResolve = resolve; });
   } catch (e) {

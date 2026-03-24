@@ -19,9 +19,18 @@ export class ShellCapability implements Capability {
   };
 
   async execute(input: Record<string, unknown>, cwd: string): Promise<CapabilityResult> {
-    const command = String(input.command ?? '');
+    let command = String(input.command ?? '');
     const timeout = Number(input.timeout_ms ?? 30_000);
     const start = Date.now();
+
+    // Auto-redirect background processes to prevent FD inheritance.
+    // When bash runs `cmd &`, the child inherits stdout/stderr and keeps them
+    // open after bash exits — causing shell_exec to hang indefinitely.
+    // Injecting `> /tmp/... 2>&1` before `&` makes bash exit immediately.
+    if (/&\s*$/.test(command) && !/[>|].*&\s*$/.test(command)) {
+      const logFile = `/tmp/0agent-bg-${Date.now()}.log`;
+      command = command.replace(/\s*&\s*$/, ` > ${logFile} 2>&1 &`);
+    }
 
     return new Promise((resolve_) => {
       const chunks: string[] = [];
