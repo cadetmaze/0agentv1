@@ -518,7 +518,7 @@ async function streamSession(sessionId) {
       ws.send(JSON.stringify({ type: 'subscribe', topics: ['sessions'] }));
     });
 
-    ws.on('message', (data) => {
+    ws.on('message', async (data) => {
       try {
         const event = JSON.parse(data.toString());
         if (event.session_id !== sessionId) return;
