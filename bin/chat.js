@@ -39,6 +39,18 @@ class Spinner {
     if (clearIt) process.stdout.write('\r\x1b[2K');
   }
   get active() { return this._active; }
+
+  /**
+   * Pause spinner, run fn() (which may print lines), then resume.
+   * Prevents spinner from overwriting printed content.
+   */
+  pauseFor(fn) {
+    const wasActive = this._active;
+    const savedMsg  = this._msg;
+    if (wasActive) this.stop(true);
+    fn();
+    if (wasActive) this.start(savedMsg);
+  }
 }
 
 // ─── ANSI helpers ─────────────────────────────────────────────────────────────
@@ -371,7 +383,9 @@ async function runTask(input) {
     });
     const s = await res.json();
     sessionId = s.session_id ?? s.id;
-    spinner.start('Thinking');  // show immediately after session created
+    // Show affordance so user knows they can queue messages while agent works
+    process.stdout.write(`\n  \x1b[2m(type and press Enter to queue next message)\x1b[0m\n`);
+    spinner.start('Thinking');
 
     // Polling fallback — runs concurrently with WS events.
     // Catches completion when WS is disconnected (e.g. daemon just restarted).
@@ -926,11 +940,20 @@ rl.on('line', async (input) => {
   const line = input.trim();
   if (!line) { rl.prompt(); return; }
 
-  // If a session is already running, queue the message
+  // If a session is already running, queue the message.
+  // pauseFor() stops the spinner briefly so the user can see the confirmation,
+  // then resumes — prevents spinner from overwriting their typed text.
   if (pendingResolve) {
     messageQueue.push(line);
     const qLen = messageQueue.length;
-    process.stdout.write(`\n  ${fmt(C.dim, `↳ queued [${qLen}]`)} ${fmt(C.dim, line.slice(0, 60))}\n`);
+    spinner.pauseFor(() => {
+      process.stdout.write(
+        `  ${fmt(C.magenta, '↳')} ${fmt(C.bold, `[queued #${qLen}]`)} ${fmt(C.dim, line.slice(0, 70))}\n`
+      );
+      if (qLen > 1) {
+        process.stdout.write(`  ${fmt(C.dim, `${qLen} tasks waiting`)}\n`);
+      }
+    });
     return;
   }
 
