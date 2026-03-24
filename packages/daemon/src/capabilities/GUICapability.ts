@@ -19,6 +19,7 @@
  *   find_and_click  — OCR-find text on screen and click it
  *   get_screen_size — return screen width × height
  *   get_cursor_pos  — return current mouse cursor position (x, y)
+ *   wait            — pause for N seconds to let UI / page load before next action
  *   open_url        — open a URL in the existing browser window (no new window), launch browser if needed
  *   open_app        — open an application by name (macOS/Linux)
  */
@@ -36,11 +37,12 @@ export class GUICapability implements Capability {
   readonly toolDefinition: ToolDefinition = {
     name: 'gui_automation',
     description:
-      'Desktop GUI automation — ONLY use for tasks that explicitly require controlling the screen. ' +
-      'DO NOT use for coding, research, file edits, or any task that does not need the desktop UI. ' +
-      'Actions: click, type, hotkey, scroll, find_and_click, open_url, open_app. ' +
-      'screenshot: use sparingly — only when you cannot proceed without seeing the current screen. Max 2 per task. ' +
-      'To open a website use open_url (reuses existing browser tab, never opens duplicate windows).',
+      'Desktop GUI automation — ONLY for tasks that explicitly require controlling the screen. ' +
+      'DO NOT use for coding, research, file edits, or tasks that do not need the desktop UI. ' +
+      'DO NOT use alongside browser_open for the same URL — pick one tool and finish the task in it. ' +
+      'wait: pause N seconds for UI/page to load — use after every navigation or click that triggers a page load. ' +
+      'screenshot: only when you cannot proceed without seeing the screen. Max 2 per task. ' +
+      'open_url: opens in existing browser tab, never duplicates windows.',
     input_schema: {
       type: 'object',
       properties: {
@@ -49,7 +51,7 @@ export class GUICapability implements Capability {
           description:
             '"screenshot" | "click" | "double_click" | "right_click" | "move" | ' +
             '"type" | "hotkey" | "scroll" | "drag" | "find_and_click" | ' +
-            '"get_screen_size" | "get_cursor_pos" | "open_url" | "open_app"',
+            '"get_screen_size" | "get_cursor_pos" | "wait" | "open_url" | "open_app"',
         },
         x:         { type: 'number',  description: 'X coordinate (pixels from left)' },
         y:         { type: 'number',  description: 'Y coordinate (pixels from top)' },
@@ -61,6 +63,7 @@ export class GUICapability implements Capability {
         amount:    { type: 'number',  description: 'Scroll clicks (default 3)' },
         app:       { type: 'string',  description: 'App name to open e.g. "Safari", "Terminal", "Chrome"' },
         url:       { type: 'string',  description: 'URL to open e.g. "https://example.com" (use with open_url)' },
+        seconds:   { type: 'number',  description: 'Seconds to wait (use with wait action, default 2)' },
         interval:  { type: 'number',  description: 'Seconds to wait between actions (default 0.05)' },
         duration:  { type: 'number',  description: 'Seconds for mouse movement animation (default 0.2)' },
       },
@@ -74,7 +77,7 @@ export class GUICapability implements Capability {
 
     const script = this._buildScript(action, input);
     if (!script) {
-      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, open_url, open_app`, duration_ms: 0 };
+      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, wait, open_url, open_app`, duration_ms: 0 };
     }
 
     if (signal?.aborted) {
@@ -177,6 +180,7 @@ export class GUICapability implements Capability {
     const amount   = input.amount    != null ? Number(input.amount)  : 3;
     const app      = input.app       != null ? String(input.app)     : '';
     const url      = input.url       != null ? String(input.url)     : '';
+    const seconds  = input.seconds   != null ? Number(input.seconds) : 2;
     const interval = input.interval  != null ? Number(input.interval): 0.05;
     const duration = input.duration  != null ? Number(input.duration): 0.2;
 
@@ -199,6 +203,12 @@ print(f"Screen size: {w} x {h}")
         return header + `
 x, y = pyautogui.position()
 print(f"Cursor position: ({x}, {y})")
+`;
+
+      case 'wait':
+        return header + `
+time.sleep(${seconds})
+print(f"Waited ${seconds}s")
 `;
 
       case 'screenshot': {

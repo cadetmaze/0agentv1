@@ -27,15 +27,15 @@ function findSystemChrome(): string | null {
 
 export class BrowserCapability implements Capability {
   readonly name = 'browser_open';
-  readonly description = 'Open a URL in the system browser or extract page content. Use when scrape_url fails on JS-heavy pages.';
+  readonly description = 'Headless browser for scraping JS-heavy pages. NOT for user-facing browser automation.';
 
   readonly toolDefinition: ToolDefinition = {
     name: 'browser_open',
     description:
-      'Open or read a URL using the system browser. ' +
-      'Use action="open" to launch the URL visibly in the user\'s default browser. ' +
-      'Use action="read" (default) to extract page content headlessly. ' +
-      'Use when scrape_url fails on JS-heavy pages.',
+      'Headless browser — ONLY for reading/scraping page content when scrape_url fails on JS-heavy pages. ' +
+      'action="read" (default): extract text headlessly (invisible, no real browser window opened). ' +
+      'NEVER use this when the task involves the user\'s real browser or visible UI — use gui_automation with open_url instead. ' +
+      'Do NOT use alongside gui_automation for the same URL — pick one.',
     input_schema: {
       type: 'object',
       properties: {
