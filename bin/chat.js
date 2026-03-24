@@ -773,62 +773,61 @@ async function _safeJsonFetch(url, opts) {
     console.log(`  ${fmt(C.yellow, '⚠')} LLM check failed: ${e.message}\n`);
   }
 
-  // ── Version check — ask to update if newer version is on npm ──────────────
-  try {
-    const pkgPath = resolve(new URL(import.meta.url).pathname, '..', '..', 'package.json');
-    const currentVersion = existsSync(pkgPath)
-      ? JSON.parse(readFileSync(pkgPath, 'utf8')).version
-      : null;
+  // ── Auto-update: check npm, update silently, restart ─────────────────────
+  // Runs in background after prompt — never blocks startup.
+  // If update found: counts down 3s (press any key to skip), then auto-installs.
+  (async () => {
+    try {
+      const pkgPath = resolve(new URL(import.meta.url).pathname, '..', '..', 'package.json');
+      const currentVersion = existsSync(pkgPath)
+        ? JSON.parse(readFileSync(pkgPath, 'utf8')).version
+        : null;
+      if (!currentVersion) return;
 
-    if (currentVersion) {
       const reg = await fetch('https://registry.npmjs.org/0agent/latest', {
-        signal: AbortSignal.timeout(4000),
+        signal: AbortSignal.timeout(5000),
       }).then(r => r.json()).catch(() => null);
 
       const latest = reg?.version;
-      if (latest && latest !== currentVersion && isNewerVersion(latest, currentVersion)) {
-        console.log(`\n  ${fmt(C.yellow, '↑')} Update available: ${fmt(C.dim, currentVersion)} → ${fmt(C.bold + C.green, latest)}`);
-        process.stdout.write(`  Update now? ${fmt(C.bold, '[y/N]')} `);
+      if (!latest || !isNewerVersion(latest, currentVersion)) return;
 
-        await new Promise((res) => {
-          const handler = async (buf) => {
-            const answer = buf.toString().trim().toLowerCase();
-            process.stdout.write(answer + '\n');
-            if (answer === 'y') {
-              process.stdout.write(`\n  ${fmt(C.dim, 'Installing 0agent@latest...')}\n`);
-              try {
-                const { execSync: exs } = await import('node:child_process');
-                exs('npm install -g 0agent@latest', { stdio: 'inherit', timeout: 120_000 });
-                process.stdout.write(`\n  ${fmt(C.green, '✓')} Updated to ${latest} — restarting...\n\n`);
-                // Restart: spawn new instance, exit current
-                const { spawn: sp } = await import('node:child_process');
-                const child = sp(process.argv[0], process.argv.slice(1), { stdio: 'inherit' });
-                child.on('close', (code) => process.exit(code ?? 0));
-                process.stdin.pause();
-              } catch (e) {
-                process.stdout.write(`\n  ${fmt(C.red, '✗')} Update failed: ${e.message}\n  Try manually: npm install -g 0agent@latest\n\n`);
-                rl.prompt();
-              }
-            } else {
-              process.stdout.write(`  ${fmt(C.dim, `Skipping — run: npm install -g 0agent@${latest} to update later`)}\n\n`);
-              rl.prompt();
-            }
-            res();
-          };
+      // Show banner immediately above current prompt line
+      process.stdout.write(`\n  ${fmt(C.yellow, '↑')} New version ${fmt(C.bold, latest)} available (you have ${currentVersion})\n`);
 
-          // Single keypress if TTY, line otherwise
-          if (process.stdin.isTTY) {
-            process.stdin.once('data', handler);
-          } else {
-            rl.once('line', (line) => handler(Buffer.from(line)));
-          }
-        });
-        return; // rl.prompt() already called in handler
+      // 3-second countdown — press any key to skip, otherwise auto-updates
+      let skipped = false;
+      const skipHandler = () => { skipped = true; };
+      process.stdin.once('data', skipHandler);
+
+      for (let i = 3; i > 0; i--) {
+        if (skipped) break;
+        process.stdout.write(`\r  ${fmt(C.dim, `Auto-updating in ${i}s — press any key to skip...  `)}`);
+        await new Promise(r => setTimeout(r, 1000));
       }
+      process.stdin.removeListener('data', skipHandler);
+      process.stdout.write('\r\x1b[2K'); // clear countdown line
+
+      if (skipped) {
+        console.log(`  ${fmt(C.dim, `Skipped. Run: npm install -g 0agent@${latest}`)}`);
+        rl.prompt(true);
+        return;
+      }
+
+      // Auto-install
+      console.log(`  ${fmt(C.cyan, '↑')} Updating to ${latest}...`);
+      const { execSync: exs } = await import('node:child_process');
+      exs('npm install -g 0agent@latest --silent', { stdio: 'ignore', timeout: 120_000 });
+      process.stdout.write(`  ${fmt(C.green, '✓')} Updated to ${latest} — restarting...\n\n`);
+
+      // Restart cleanly
+      const { spawn: sp } = await import('node:child_process');
+      const child = sp(process.argv[0], process.argv.slice(1), { stdio: 'inherit' });
+      child.on('close', (code) => process.exit(code ?? 0));
+      process.stdin.pause();
+    } catch {
+      // Non-fatal — update failure never crashes the agent
     }
-  } catch {
-    // Version check is non-fatal — never block startup
-  }
+  })();
 
   rl.prompt();
 })();
