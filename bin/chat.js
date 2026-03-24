@@ -7,11 +7,40 @@
  * /model to switch. /key to add provider keys. Never forgets previous keys.
  */
 
-import { createInterface } from 'node:readline';
+import { createInterface, emitKeypressEvents, moveCursor, clearLine } from 'node:readline';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import YAML from 'yaml';
+
+// ─── Slash command registry (used for live menu + tab completion) ─────────────
+const SLASH_COMMANDS = [
+  // Skills
+  { cmd: '/review',        desc: 'Code review — bugs, style, security issues'     },
+  { cmd: '/build',         desc: 'Build project and fix compilation errors'        },
+  { cmd: '/qa',            desc: 'Generate and run tests'                          },
+  { cmd: '/debug',         desc: 'Debug a failing test or runtime error'           },
+  { cmd: '/refactor',      desc: 'Refactor a file or module'                       },
+  { cmd: '/test-writer',   desc: 'Write unit tests for your code'                  },
+  { cmd: '/doc',           desc: 'Generate documentation'                          },
+  { cmd: '/research',      desc: 'Research a topic, person, or company'            },
+  { cmd: '/retro',         desc: 'Weekly retrospective — what went well / badly'   },
+  { cmd: '/ship',          desc: 'Pre-release checklist — ready to deploy?'        },
+  { cmd: '/office-hours',  desc: 'Plan a new feature or project from scratch'      },
+  { cmd: '/plan-eng-review',desc:'Engineering planning review'                     },
+  { cmd: '/security-audit',desc: 'Security audit — find vulnerabilities'           },
+  { cmd: '/design-review', desc: 'Design review — architecture and patterns'       },
+  // Built-ins
+  { cmd: '/model',         desc: 'Show or switch the LLM model'                   },
+  { cmd: '/key',           desc: 'Update a stored API key'                         },
+  { cmd: '/status',        desc: 'Daemon health, graph stats, active sessions'     },
+  { cmd: '/skills',        desc: 'List all available skills'                       },
+  { cmd: '/schedule',      desc: 'Manage scheduled / recurring tasks'              },
+  { cmd: '/update',        desc: 'Update 0agent to the latest version'             },
+  { cmd: '/graph',         desc: 'Open 3D knowledge graph in browser'              },
+  { cmd: '/clear',         desc: 'Clear the screen'                                },
+  { cmd: '/help',          desc: 'Show this help'                                  },
+];
 
 const AGENT_DIR   = resolve(homedir(), '.0agent');
 const CONFIG_PATH = resolve(AGENT_DIR, 'config.yaml');
@@ -183,7 +212,7 @@ function printHeader() {
   const modelStr = provider ? `${provider.provider}/${provider.model}` : 'no model';
   console.log();
   console.log(fmt(C.bold, '  0agent') + fmt(C.dim, ` — ${modelStr}`));
-  console.log(fmt(C.dim, '  Type a task, or /help for commands. Ctrl+C to exit.\n'));
+  console.log(fmt(C.dim, '  Type a task or /command — press Tab to browse, / to see all.\n'));
 }
 
 function printInsights() {
@@ -328,6 +357,14 @@ function handleWsEvent(event) {
       if (r.files_written?.length) console.log(`\n  ${fmt(C.green, '✓')} ${r.files_written.join(', ')}`);
       if (r.tokens_used) process.stdout.write(fmt(C.dim, `\n  ${r.tokens_used} tokens · ${r.model ?? ''}\n`));
 
+      // Contextual next-step suggestions
+      const suggestions = _suggestNext(lineBuffer, r);
+      if (suggestions.length > 0 && messageQueue.length === 0) {
+        process.stdout.write(
+          `  ${fmt(C.dim, '→')} ${suggestions.map(s => fmt(C.cyan, s)).join(fmt(C.dim, '  ·  '))}\n`
+        );
+      }
+
       // Confirm server if port mentioned
       confirmServer(r, lineBuffer);
       lineBuffer = '';
@@ -379,6 +416,26 @@ function handleWsEvent(event) {
       break;
     }
   }
+}
+
+function _suggestNext(output, result) {
+  const text = (output + ' ' + (result?.output ?? '') + ' ' + JSON.stringify(result?.files_written ?? [])).toLowerCase();
+  if (text.includes('written') || text.includes('creat') || text.includes('built') || (result?.files_written?.length > 0)) {
+    return ['/review', '/qa'];
+  }
+  if (text.includes('test') || text.includes('spec') || text.includes('pass')) {
+    return ['/ship'];
+  }
+  if (text.includes('research') || text.includes('found') || text.includes('results')) {
+    return ['/office-hours', '/doc'];
+  }
+  if (text.includes('bug') || text.includes('fix') || text.includes('error') || text.includes('debug')) {
+    return ['/qa', '/review'];
+  }
+  if (text.includes('deploy') || text.includes('server') || text.includes('running')) {
+    return ['/qa', '/ship'];
+  }
+  return [];
 }
 
 async function confirmServer(result, output) {
@@ -751,23 +808,116 @@ async function handleCommand(input) {
   }
 }
 
+// ─── Live slash-command menu ──────────────────────────────────────────────────
+// Drawn below the prompt as the user types. Uses moveCursor to avoid cursor
+// save/restore conflicts with readline.
+let _menuLines = 0; // how many lines the current menu occupies below the cursor
+
+function _drawMenu(filter) {
+  if (pendingResolve) { _clearMenu(); return; } // don't show while session running
+
+  const items = filter === null ? [] :
+    SLASH_COMMANDS.filter(c =>
+      !filter || c.cmd.slice(1).toLowerCase().startsWith(filter.toLowerCase())
+    ).slice(0, 10);
+
+  // If nothing changed (same count), skip redraw to avoid flicker
+  if (items.length === 0) { _clearMenu(); return; }
+
+  const needed = items.length + 1; // +1 for blank line
+
+  // Move down past existing menu lines (or 0), then clear downward
+  const existingLines = _menuLines;
+  if (existingLines > 0) {
+    moveCursor(process.stdout, 0, existingLines);
+    for (let i = 0; i < existingLines; i++) {
+      clearLine(process.stdout, 0);
+      if (i < existingLines - 1) moveCursor(process.stdout, 0, -1);
+    }
+    moveCursor(process.stdout, 0, -(existingLines - 1));
+  }
+
+  // Print blank separator + menu items, tracking column 0
+  process.stdout.write('\n');
+  for (const m of items) {
+    process.stdout.write(
+      `  ${fmt(C.cyan, m.cmd.padEnd(20))} ${fmt(C.dim, m.desc)}\x1b[K\n`
+    );
+  }
+
+  // Move back up to the prompt line and restore cursor after the typed text
+  moveCursor(process.stdout, 0, -(needed));
+  // Jump to end of current line (readline already put cursor there)
+  moveCursor(process.stdout, 999, 0);
+
+  _menuLines = needed;
+}
+
+function _clearMenu() {
+  if (_menuLines === 0) return;
+  const n = _menuLines;
+  _menuLines = 0;
+  moveCursor(process.stdout, 0, n);
+  for (let i = 0; i < n; i++) {
+    clearLine(process.stdout, 0);
+    moveCursor(process.stdout, 0, -1);
+  }
+  moveCursor(process.stdout, 0, 1); // back to prompt line
+}
+
 // ─── Main REPL ────────────────────────────────────────────────────────────────
 const rl = createInterface({
   input:  process.stdin,
   output: process.stdout,
   prompt: `\n  ${fmt(C.cyan, '›')} `,
   historySize: 100,
-  completer: (line) => {
-    const commands = ['/model', '/key', '/status', '/skills', '/graph', '/clear', '/help',
-      '/schedule', '/schedule list', '/schedule add',
-      '/review', '/build', '/debug', '/qa', '/research', '/refactor', '/test-writer', '/retro'];
-    const hits = commands.filter(c => c.startsWith(line));
-    return [hits.length ? hits : commands, line];
+  completer: (line, callback) => {
+    if (!line.startsWith('/')) return callback(null, [[], line]);
+
+    const filter = line.slice(1).toLowerCase();
+    const matches = SLASH_COMMANDS.filter(c =>
+      !filter || c.cmd.slice(1).startsWith(filter)
+    );
+
+    if (matches.length === 0) return callback(null, [[], line]);
+
+    // Single match — let readline silently auto-complete
+    if (matches.length === 1) {
+      _clearMenu();
+      return callback(null, [[matches[0].cmd + ' '], line]);
+    }
+
+    // Multiple matches — print formatted menu, suppress readline's plain list
+    _clearMenu();
+    process.stdout.write('\n\n');
+    for (const m of matches.slice(0, 12)) {
+      process.stdout.write(`  ${fmt(C.cyan, m.cmd.padEnd(22))} ${fmt(C.dim, m.desc)}\n`);
+    }
+    if (matches.length > 12) {
+      process.stdout.write(`  ${fmt(C.dim, `…and ${matches.length - 12} more`)}\n`);
+    }
+    process.stdout.write('\n');
+    setImmediate(() => rl.prompt(true));
+    return callback(null, [[], line]);
   },
 });
 
-// Restore history from conversations if possible
-rl.on('history', () => {});
+// Live menu on keypress — draws below the prompt as user types
+emitKeypressEvents(process.stdin, rl);
+process.stdin.on('keypress', (_char, key) => {
+  if (key?.name === 'return' || key?.name === 'enter') {
+    _clearMenu(); // clear before readline processes the line
+    return;
+  }
+  setImmediate(() => {
+    const line = rl.line ?? '';
+    if (line.startsWith('/') && !pendingResolve) {
+      _drawMenu(line.slice(1));
+    } else {
+      _clearMenu();
+    }
+  });
+});
 
 printHeader();
 printInsights();
@@ -1075,8 +1225,20 @@ async function drainQueue() {
 }
 
 rl.on('line', async (input) => {
+  _clearMenu(); // always clear menu when a line is submitted
   const line = input.trim();
   if (!line) { rl.prompt(); return; }
+
+  // Bare `/` → show full command palette
+  if (line === '/') {
+    console.log('');
+    for (const m of SLASH_COMMANDS) {
+      console.log(`  ${fmt(C.cyan, m.cmd.padEnd(22))} ${fmt(C.dim, m.desc)}`);
+    }
+    console.log('');
+    rl.prompt();
+    return;
+  }
 
   // If a session is already running, queue the message.
   // pauseFor() stops the spinner briefly so the user can see the confirmation,
