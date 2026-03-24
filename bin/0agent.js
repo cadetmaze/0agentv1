@@ -86,6 +86,14 @@ switch (cmd) {
     showLogs(args.slice(1));
     break;
 
+  case 'team':
+    await runTeamCommand(args.slice(1));
+    break;
+
+  case 'serve':
+    await runServe(args.slice(1));
+    break;
+
   default:
     showHelp();
     break;
@@ -614,6 +622,183 @@ function showLogs(logArgs) {
 
 // ─── Help ─────────────────────────────────────────────────────────────────
 
+// ─── Team commands ────────────────────────────────────────────────────────────
+
+async function runTeamCommand(teamArgs) {
+  const sub = teamArgs[0];
+  const SYNC_URL = process.env['ZEROAGENT_SYNC'] ?? 'http://localhost:4201';
+
+  switch (sub) {
+    case 'create': {
+      const name = teamArgs.slice(1).join(' ');
+      if (!name) { console.log('  Usage: 0agent team create "<name>"'); break; }
+      const res = await fetch(`${SYNC_URL}/api/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          creator_entity_id: crypto.randomUUID(),
+          creator_name: process.env['USER'] ?? 'User',
+        }),
+      }).catch(() => null);
+      if (!res?.ok) { console.log(`  Sync server not running. Start it with: 0agent serve`); break; }
+      const team = await res.json();
+      console.log(`\n  ✓ Team created: ${team.name}`);
+      console.log(`  Invite code:   \x1b[1m${team.invite_code}\x1b[0m`);
+      console.log(`\n  Share with teammates:`);
+      console.log(`    0agent team join ${team.invite_code} --server ${SYNC_URL}\n`);
+      break;
+    }
+
+    case 'join': {
+      const code = teamArgs[1]?.toUpperCase();
+      const serverIdx = teamArgs.indexOf('--server');
+      const serverUrl = serverIdx >= 0 ? teamArgs[serverIdx + 1] : SYNC_URL;
+      if (!code) { console.log('  Usage: 0agent team join <CODE> [--server <url>]'); break; }
+      const res = await fetch(`${serverUrl}/api/teams/by-code/${code}`).catch(() => null);
+      if (!res?.ok) { console.log(`  Invalid code or sync server unreachable: ${serverUrl}`); break; }
+      const team = await res.json();
+      const joinRes = await fetch(`${serverUrl}/api/teams/${team.id}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entity_node_id: crypto.randomUUID(),
+          name: process.env['USER'] ?? 'User',
+        }),
+      });
+      if (!joinRes.ok) { console.log('  Failed to join team.'); break; }
+      console.log(`\n  ✓ Joined: ${team.name}`);
+      console.log(`  Members: ${team.members?.length ?? '?'}`);
+      console.log(`  Sync server: ${serverUrl}\n`);
+      break;
+    }
+
+    case 'list': {
+      // Show teams from local teams.yaml
+      const { readFileSync, existsSync } = await import('node:fs');
+      const { resolve } = await import('node:path');
+      const { homedir } = await import('node:os');
+      const teamsPath = resolve(homedir(), '.0agent', 'teams.yaml');
+      if (!existsSync(teamsPath)) { console.log('\n  No teams joined yet. Use: 0agent team join <CODE>\n'); break; }
+      const YAML = await import('yaml');
+      const config = YAML.parse(readFileSync(teamsPath, 'utf8'));
+      console.log('\n  Your teams:\n');
+      for (const m of (config.memberships ?? [])) {
+        const ago = m.last_synced_at ? `synced ${Math.round((Date.now() - m.last_synced_at) / 60000)}m ago` : 'never synced';
+        console.log(`  ${m.team_name.padEnd(24)} ${m.invite_code}  ${ago}`);
+        console.log(`  ${' '.repeat(24)} ${m.server_url}`);
+      }
+      console.log();
+      break;
+    }
+
+    default:
+      console.log('  Usage: 0agent team create "<name>" | join <CODE> [--server <url>] | list');
+  }
+}
+
+// ─── Serve command (sync server + optional tunnel) ────────────────────────────
+
+async function runServe(serveArgs) {
+  const hasTunnel = serveArgs.includes('--tunnel');
+  const port = parseInt(serveArgs.find(a => a.match(/^\d+$/)) ?? '4201', 10);
+
+  console.log(`\n  Starting 0agent sync server on port ${port}...\n`);
+
+  // Find sync server entry point
+  const { resolve, dirname } = await import('node:path');
+  const { existsSync } = await import('node:fs');
+  const { spawn } = await import('node:child_process');
+  const { networkInterfaces } = await import('node:os');
+
+  const pkgRoot = resolve(dirname(new URL(import.meta.url).pathname), '..');
+  const serverScript = resolve(pkgRoot, 'packages', 'sync-server', 'src', 'index.ts');
+
+  if (!existsSync(serverScript)) {
+    console.log('  Sync server not found in package. Install with: npm install -g 0agent');
+    return;
+  }
+
+  // Start sync server
+  const proc = spawn(process.execPath, ['--experimental-specifier-resolution=node', serverScript], {
+    env: { ...process.env, SYNC_PORT: String(port), SYNC_HOST: '0.0.0.0' },
+    stdio: 'inherit',
+    detached: false,
+  });
+
+  // Get LAN IP
+  const nets = networkInterfaces();
+  let lanIp = '127.0.0.1';
+  for (const iface of Object.values(nets)) {
+    if (!iface) continue;
+    for (const net of iface) {
+      if (net.family === 'IPv4' && !net.internal) { lanIp = net.address; break; }
+    }
+  }
+
+  await sleep(1500);
+
+  const localUrl = `http://localhost:${port}`;
+  const lanUrl   = `http://${lanIp}:${port}`;
+
+  console.log(`\n  ✓ Sync server running`);
+  console.log(`  Local:  ${localUrl}`);
+  console.log(`  LAN:    ${lanUrl}  ← share with teammates on same WiFi`);
+
+  if (hasTunnel) {
+    console.log('\n  Opening public tunnel...');
+    let tunnelUrl = null;
+
+    // Try cloudflared
+    try {
+      const { execSync: es } = await import('node:child_process');
+      es('which cloudflared', { stdio: 'ignore' });
+      const cf = spawn('cloudflared', ['tunnel', '--url', localUrl], { stdio: ['ignore', 'pipe', 'pipe'] });
+      cf.unref();
+      tunnelUrl = await waitForTunnelUrl(cf, /https:\/\/[a-z0-9\-]+\.trycloudflare\.com/i, 12000);
+    } catch {}
+
+    // Try ngrok
+    if (!tunnelUrl) {
+      try {
+        const { execSync: es } = await import('node:child_process');
+        es('which ngrok', { stdio: 'ignore' });
+        const ng = spawn('ngrok', ['http', String(port), '--log=stdout'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        ng.unref();
+        tunnelUrl = await waitForTunnelUrl(ng, /https:\/\/[a-z0-9\-]+\.ngrok/i, 8000);
+      } catch {}
+    }
+
+    if (tunnelUrl) {
+      console.log(`  Public: \x1b[1m${tunnelUrl}\x1b[0m  ← share with anyone`);
+      const code = Math.random().toString(36).slice(2,5).toUpperCase() + '-' + Math.floor(1000+Math.random()*9000);
+      console.log(`\n  Share this with teammates:`);
+      console.log(`    0agent team join <CODE> --server ${tunnelUrl}\n`);
+    } else {
+      console.log('  No tunnel tool found. Install cloudflared: brew install cloudflared');
+      console.log('  Using LAN only.');
+    }
+  }
+
+  console.log('\n  Press Ctrl+C to stop.\n');
+  proc.on('close', () => process.exit(0));
+}
+
+async function waitForTunnelUrl(proc, pattern, timeout) {
+  return new Promise(resolve => {
+    const chunks = [];
+    const onData = d => {
+      const s = d.toString(); chunks.push(s);
+      const match = chunks.join('').match(pattern);
+      if (match) { cleanup(); resolve(match[0]); }
+    };
+    proc.stdout?.on('data', onData);
+    proc.stderr?.on('data', onData);
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, timeout);
+    const cleanup = () => { clearTimeout(timer); proc.stdout?.removeListener('data', onData); proc.stderr?.removeListener('data', onData); };
+  });
+}
+
 function showHelp() {
   console.log(`
   0agent — An agent that learns.
@@ -632,6 +817,13 @@ function showHelp() {
     0agent improve                 Self-improvement analysis
     0agent logs                    Tail daemon logs
 
+  Team collaboration:
+    0agent serve                   Start sync server (LAN)
+    0agent serve --tunnel          Start sync server + public tunnel
+    0agent team create "<name>"    Create a team, get invite code
+    0agent team join <CODE>        Join a team by invite code
+    0agent team list               List your teams
+
   Dashboard:
     http://localhost:4200           Web UI (after starting daemon)
 
@@ -640,6 +832,7 @@ function showHelp() {
     0agent /research "Acme Corp funding"
     0agent /build --task next
     0agent /qa --url https://staging.myapp.com
+    0agent serve --tunnel          # then share the URL + 0agent team join <CODE>
 `);
 }
 

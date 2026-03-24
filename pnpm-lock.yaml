@@ -97,6 +97,9 @@ importers:
         specifier: ^3.23.0
         version: 3.25.76
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.12
+        version: 7.6.13
       '@types/node':
         specifier: ^25.5.0
         version: 25.5.0
@@ -194,6 +197,31 @@ importers:
       vitest:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@25.5.0)
+
+  packages/sync-server:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.0
+        version: 1.19.11(hono@4.12.9)
+      better-sqlite3:
+        specifier: ^11.6.0
+        version: 11.10.0
+      hono:
+        specifier: ^4.6.0
+        version: 4.12.9
+      yaml:
+        specifier: ^2.6.0
+        version: 2.8.3
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.12
+        version: 7.6.13
+      '@types/node':
+        specifier: ^25.5.0
+        version: 25.5.0
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
 
 packages:
 
