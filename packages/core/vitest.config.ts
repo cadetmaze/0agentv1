@@ -7,6 +7,7 @@ export default defineConfig({
       "../../tests/unit/**/*.test.ts",
       "../../tests/convergence/**/*.test.ts",
       "../../tests/capabilities/**/*.test.ts",
+      "../../tests/reliability/**/*.test.ts",
     ],
     testTimeout: 30000,
   },
