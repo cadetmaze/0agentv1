@@ -1,6 +1,6 @@
 {
   "name": "0agent",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
   "private": false,
   "license": "Apache-2.0",
@@ -24,6 +24,7 @@
   "dependencies": {
     "@hono/node-server": "^1.13.0",
     "better-sqlite3": "^11.6.0",
+    "enquirer": "^2.4.1",
     "hono": "^4.6.0",
     "ws": "^8.18.0",
     "yaml": "^2.6.0",

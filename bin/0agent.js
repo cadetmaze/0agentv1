@@ -112,20 +112,28 @@ switch (cmd) {
 // Arrow-key select using enquirer (falls back to number input if not available)
 async function arrowSelect(message, choices, initial = 0) {
   try {
-    const { Select } = await import('enquirer');
-    const prompt = new Select({ message, choices: choices.map((c, i) => ({ name: c, value: i })), initial });
+    const mod = await import('enquirer');
+    const Enquirer = mod.default ?? mod;
+    const prompt = new Enquirer.Select({
+      message,
+      choices: choices.map((c, i) => ({ name: c, value: String(i) })),
+      initial,
+    });
     const answer = await prompt.run();
-    return choices.indexOf(answer);
+    // answer is the name string — find its index
+    const idx = choices.indexOf(answer);
+    return idx >= 0 ? idx : initial;
   } catch {
-    // Fallback: number-based selection (no enquirer)
+    // Fallback: number-based selection if enquirer unavailable or non-TTY
     return choose(message, choices, initial);
   }
 }
 
 async function arrowInput(message, initial = '') {
   try {
-    const { Input } = await import('enquirer');
-    const prompt = new Input({ message, initial });
+    const mod = await import('enquirer');
+    const Enquirer = mod.default ?? mod;
+    const prompt = new Enquirer.Input({ message, initial });
     return await prompt.run();
   } catch {
     return ask(`  ${message}: `);
@@ -134,8 +142,9 @@ async function arrowInput(message, initial = '') {
 
 async function arrowPassword(message) {
   try {
-    const { Password } = await import('enquirer');
-    const prompt = new Password({ message });
+    const mod = await import('enquirer');
+    const Enquirer = mod.default ?? mod;
+    const prompt = new Enquirer.Password({ message });
     return await prompt.run();
   } catch {
     return ask(`  ${message}: `);
