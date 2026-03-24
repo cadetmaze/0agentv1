@@ -6,6 +6,7 @@ export default defineConfig({
     include: [
       "../../tests/unit/**/*.test.ts",
       "../../tests/convergence/**/*.test.ts",
+      "../../tests/capabilities/**/*.test.ts",
     ],
   },
 });

@@ -18,7 +18,7 @@ import { spawn } from 'node:child_process';
 import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, relative } from 'node:path';
 import type { LLMExecutor, LLMMessage, LLMResponse } from './LLMExecutor.js';
-import { AGENT_TOOLS } from './LLMExecutor.js';
+import { CapabilityRegistry } from './capabilities/index.js';
 
 export interface AgentResult {
   output: string;
@@ -39,6 +39,7 @@ export class AgentExecutor {
   private cwd: string;
   private maxIterations: number;
   private maxCommandMs: number;
+  private registry: CapabilityRegistry;
 
   constructor(
     private llm: LLMExecutor,
@@ -49,6 +50,7 @@ export class AgentExecutor {
     this.cwd = config.cwd;
     this.maxIterations = config.max_iterations ?? 20;
     this.maxCommandMs = config.max_command_ms ?? 30_000;
+    this.registry = new CapabilityRegistry();
   }
 
   async execute(task: string, systemContext?: string): Promise<AgentResult> {
@@ -71,7 +73,7 @@ export class AgentExecutor {
       try {
         response = await this.llm.completeWithTools(
           messages,
-          AGENT_TOOLS,
+          this.registry.getToolDefinitions(),
           systemPrompt,
           // Only stream tokens on the final (non-tool) turn
           (token) => {
@@ -111,9 +113,13 @@ export class AgentExecutor {
 
         let result: string;
         try {
-          result = await this.executeTool(tc.name, tc.input);
+          const capResult = await this.registry.execute(tc.name, tc.input, this.cwd);
+          result = capResult.output;
+          if (capResult.fallback_used) {
+            this.onStep(`  (used fallback: ${capResult.fallback_used})`);
+          }
           // Track artifacts
-          if (tc.name === 'write_file' && tc.input.path) {
+          if (tc.name === 'file_op' && tc.input.op === 'write' && tc.input.path) {
             filesWritten.push(String(tc.input.path));
           }
           if (tc.name === 'shell_exec' && tc.input.command) {
