@@ -4,15 +4,15 @@ import { resolve, dirname } from 'node:path';
 
 export class FileCapability implements Capability {
   readonly name = 'file_op';
-  readonly description = 'Read, write, or list files. Scoped to working directory.';
+  readonly description = 'Read, write, list files, or create directories. Scoped to working directory.';
 
   readonly toolDefinition: ToolDefinition = {
     name: 'file_op',
-    description: 'Read, write, or list files in the working directory.',
+    description: 'Read, write, list files, or create directories in the working directory.',
     input_schema: {
       type: 'object',
       properties: {
-        op:      { type: 'string', description: '"read", "write", or "list"' },
+        op:      { type: 'string', description: '"read", "write", "list", or "mkdir"' },
         path:    { type: 'string', description: 'File or directory path (relative to cwd)' },
         content: { type: 'string', description: 'Content for write operation' },
       },
@@ -56,7 +56,12 @@ export class FileCapability implements Capability {
         return { success: true, output: entries || '(empty)', duration_ms: Date.now() - start };
       }
 
-      return { success: false, output: `Unknown op: ${op}`, duration_ms: Date.now() - start };
+      if (op === 'mkdir') {
+        mkdirSync(safe, { recursive: true });
+        return { success: true, output: `Directory created: ${rel}`, duration_ms: Date.now() - start };
+      }
+
+      return { success: false, output: `Unknown op: ${op}. Use "read", "write", "list", or "mkdir"`, duration_ms: Date.now() - start };
     } catch (err) {
       return { success: false, output: `Error: ${err instanceof Error ? err.message : String(err)}`, duration_ms: Date.now() - start };
     }

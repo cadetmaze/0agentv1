@@ -23,33 +23,64 @@ class Spinner {
     this._msg = msg;
     this._frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
     this._i = 0; this._timer = null; this._active = false;
+    this._sessionMode = false; // true during agent sessions — no \r animation
   }
+
+  // Animated spinner — safe only at startup when user cannot type yet.
+  // Uses \r which conflicts with readline when user is typing.
   start(msg) {
     if (this._active) return;
     if (msg) this._msg = msg;
     this._active = true;
+    this._sessionMode = false;
     this._timer = setInterval(() => {
       process.stdout.write(`\r  \x1b[36m${this._frames[this._i++ % this._frames.length]}\x1b[0m \x1b[2m${this._msg}\x1b[0m  `);
     }, 80);
   }
+
+  // Session mode — prints a one-time static status line, NO \r animation.
+  // readline owns the cursor; call rl.prompt(true) after this to show › .
+  startSession(msg) {
+    if (this._active) return;
+    if (msg) this._msg = msg;
+    this._active = true;
+    this._sessionMode = true;
+    process.stdout.write(`  \x1b[2m⠋ ${this._msg}...\x1b[0m\n`);
+  }
+
   update(msg) { this._msg = msg; }
+
   stop(clearIt = true) {
     if (!this._active) return;
-    clearInterval(this._timer); this._timer = null; this._active = false;
-    if (clearIt) process.stdout.write('\r\x1b[2K');
+    if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    const wasSession = this._sessionMode;
+    this._active = false;
+    this._sessionMode = false;
+    // Only clear the \r-based animation line; session mode output flows naturally
+    if (clearIt && !wasSession) {
+      process.stdout.write('\r\x1b[2K');
+    }
   }
+
   get active() { return this._active; }
 
-  /**
-   * Pause spinner, run fn() (which may print lines), then resume.
-   * Prevents spinner from overwriting printed content.
-   */
+  // Pause to print something cleanly, then resume.
   pauseFor(fn) {
-    const wasActive = this._active;
-    const savedMsg  = this._msg;
-    if (wasActive) this.stop(true);
+    const wasActive  = this._active;
+    const wasSession = this._sessionMode;
+    const savedMsg   = this._msg;
+    this.stop(!wasSession); // clear animated spinner; session mode: just deactivate
     fn();
-    if (wasActive) this.start(savedMsg);
+    if (wasActive) {
+      if (wasSession) {
+        // Re-mark active without printing again — readline is showing the prompt
+        this._active = true;
+        this._sessionMode = true;
+        this._msg = savedMsg;
+      } else {
+        this.start(savedMsg);
+      }
+    }
   }
 }
 
@@ -192,13 +223,20 @@ function handleWsEvent(event) {
     case 'session.step': {
       spinner.stop();
       if (streaming) { process.stdout.write('\n'); streaming = false; }
+      // Clear current readline line, print step, then restore › prompt
+      process.stdout.write('\r\x1b[2K');
       console.log(`  ${fmt(C.dim, '›')} ${event.step}`);
-      spinner.start(event.step.slice(0, 50));  // resume with current step label
+      spinner.startSession(event.step.slice(0, 50));
+      rl.prompt(true); // restore › so user can keep typing
       break;
     }
     case 'session.token': {
       spinner.stop();
-      if (!streaming) { process.stdout.write('\n  '); streaming = true; }
+      if (!streaming) {
+        // Clear › prompt line before streaming response
+        process.stdout.write('\r\x1b[2K\n  ');
+        streaming = true;
+      }
       process.stdout.write(event.token);
       lineBuffer += event.token;
       break;
@@ -383,9 +421,10 @@ async function runTask(input) {
     });
     const s = await res.json();
     sessionId = s.session_id ?? s.id;
-    // Show affordance so user knows they can queue messages while agent works
-    process.stdout.write(`\n  \x1b[2m(type and press Enter to queue next message)\x1b[0m\n`);
-    spinner.start('Thinking');
+    // Start session-mode status (no \r animation) then restore › so user can type
+    process.stdout.write('\n');
+    spinner.startSession('Thinking');
+    rl.prompt(true); // keep › visible — user can queue next message while agent works
 
     // Polling fallback — runs concurrently with WS events.
     // Catches completion when WS is disconnected (e.g. daemon just restarted).
@@ -416,8 +455,10 @@ async function runTask(input) {
         const steps = session.steps ?? [];
         for (let j = lastPolledStep; j < steps.length; j++) {
           spinner.stop();
+          process.stdout.write('\r\x1b[2K');
           console.log(`  \x1b[2m›\x1b[0m ${steps[j].description}`);
-          spinner.start(steps[j].description.slice(0, 50));
+          spinner.startSession(steps[j].description.slice(0, 50));
+          rl.prompt(true);
         }
         lastPolledStep = steps.length;
 
@@ -838,6 +879,64 @@ async function _safeJsonFetch(url, opts) {
     console.log(`  ${fmt(C.yellow, '⚠')} LLM check failed: ${e.message}\n`);
   }
 
+  // ── Step 3: Workspace folder check ───────────────────────────────────────
+  // If no workspace is configured, ask the user to set one now.
+  // Then export memory (graph nodes) to that folder.
+  await (async () => {
+    const wsPath = cfg?.workspace?.path;
+    if (wsPath) {
+      // Already configured — just ensure the folder exists
+      try { mkdirSync(wsPath, { recursive: true }); } catch {}
+      return;
+    }
+
+    // No workspace configured — ask inline
+    const { homedir: hd } = await import('node:os');
+    const defaultWs = resolve(hd(), '0agent-workspace');
+
+    process.stdout.write(`\n  ${fmt(C.yellow, '⚠')} No workspace folder configured.\n`);
+    process.stdout.write(`  ${fmt(C.dim, 'The agent needs a folder to create and store files.')}\n\n`);
+
+    // Temporarily close readline so we can read a raw line
+    const wsInput = await new Promise((res) => {
+      process.stdout.write(`  ${fmt(C.bold, 'Workspace path')} ${fmt(C.dim, `[${defaultWs}]`)}: `);
+      rl.once('line', (line) => res(line.trim() || defaultWs));
+    });
+
+    const chosenPath = resolve(wsInput.replace(/^~/, hd()));
+    try {
+      mkdirSync(chosenPath, { recursive: true });
+      process.stdout.write(`  ${fmt(C.green, '✓')} Created: ${fmt(C.cyan, chosenPath)}\n`);
+    } catch (e) {
+      process.stdout.write(`  ${fmt(C.red, '✗')} Could not create folder: ${e.message}\n`);
+      return;
+    }
+
+    // Save workspace path to config
+    if (!cfg) cfg = {};
+    cfg.workspace = { path: chosenPath };
+    saveConfig(cfg);
+    process.stdout.write(`  ${fmt(C.green, '✓')} Workspace saved to config\n`);
+
+    // Export memory (graph nodes) to workspace as a JSON snapshot
+    try {
+      const nodesRes = await fetch(`${BASE_URL}/api/graph/nodes?limit=9999`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (nodesRes.ok) {
+        const nodes = await nodesRes.json();
+        const count = Array.isArray(nodes) ? nodes.length : 0;
+        if (count > 0) {
+          const exportPath = resolve(chosenPath, '.0agent-memory.json');
+          writeFileSync(exportPath, JSON.stringify({ exported_at: new Date().toISOString(), nodes }, null, 2), 'utf8');
+          process.stdout.write(`  ${fmt(C.green, '✓')} Memory exported: ${fmt(C.dim, `${count} nodes → .0agent-memory.json`)}\n`);
+        }
+      }
+    } catch {}
+
+    process.stdout.write('\n');
+  })();
+
   // ── Auto-update: check npm, update silently, restart ─────────────────────
   // Runs in background after prompt — never blocks startup.
   // If update found: counts down 3s (press any key to skip), then auto-installs.
@@ -894,8 +993,8 @@ async function _safeJsonFetch(url, opts) {
 })();
 
 // Restart using the GLOBAL install, not the npx cache that's currently running.
-// After `npm install -g 0agent@latest`, the new binary is in npm's global bin dir.
-// Using process.argv would re-run the OLD npx-cached file → infinite loop.
+// After `npm install -g 0agent@latest`, use `npm root -g` to find the module root.
+// `npm bin -g` is deprecated and unreliable — use the module root instead.
 async function restartWithLatest() {
   try {
     const { execSync: ex } = await import('node:child_process');
@@ -903,22 +1002,39 @@ async function restartWithLatest() {
     const { existsSync: ef } = await import('node:fs');
     const { spawn: sp } = await import('node:child_process');
 
-    // Find the global npm bin directory (e.g. ~/.nvm/.../bin or /usr/local/bin)
-    const globalBin = ex('npm bin -g 2>/dev/null || true', { encoding: 'utf8' }).trim().split('\n')[0];
-    const newBin = globalBin ? res(globalBin, '0agent') : null;
+    // npm root -g → e.g. /Users/sahil/.nvm/versions/node/v20/lib/node_modules
+    // The 0agent entry is at {root}/0agent/bin/0agent.js
+    let newBin = null;
+    try {
+      const npmRoot = ex('npm root -g 2>/dev/null', { encoding: 'utf8' }).trim().split('\n')[0];
+      if (npmRoot) {
+        const candidate = res(npmRoot, '0agent', 'bin', '0agent.js');
+        if (ef(candidate)) newBin = candidate;
+      }
+    } catch {}
 
-    let child;
-    if (newBin && ef(newBin)) {
-      // Run the freshly installed global script
-      child = sp(process.execPath, [newBin], { stdio: 'inherit' });
-    } else {
-      // Fallback: let the shell find 0agent in PATH
-      child = sp('0agent', [], { stdio: 'inherit', shell: true });
+    if (!newBin) {
+      // Fallback: npm prefix -g gives the prefix, bin is {prefix}/bin/0agent
+      try {
+        const prefix = ex('npm prefix -g 2>/dev/null', { encoding: 'utf8' }).trim().split('\n')[0];
+        // The script wrapper lives in {prefix}/bin; the actual JS is in lib/node_modules
+        const candidate = prefix ? res(prefix, 'lib', 'node_modules', '0agent', 'bin', '0agent.js') : null;
+        if (candidate && ef(candidate)) newBin = candidate;
+      } catch {}
     }
+
+    if (!newBin) {
+      // Cannot locate the new binary — exit so user restarts manually
+      process.stdout.write(`  ${fmt(C.dim, 'Restart manually: 0agent')}\n`);
+      process.exit(0);
+      return;
+    }
+
+    const child = sp(process.execPath, [newBin], { stdio: 'inherit' });
     child.on('close', (code) => process.exit(code ?? 0));
     process.stdin.pause();
   } catch {
-    process.exit(0); // just exit; user can re-open
+    process.exit(0);
   }
 }
 
@@ -968,14 +1084,16 @@ rl.on('line', async (input) => {
   if (pendingResolve) {
     messageQueue.push(line);
     const qLen = messageQueue.length;
-    spinner.pauseFor(() => {
-      process.stdout.write(
-        `  ${fmt(C.magenta, '↳')} ${fmt(C.bold, `[queued #${qLen}]`)} ${fmt(C.dim, line.slice(0, 70))}\n`
-      );
-      if (qLen > 1) {
-        process.stdout.write(`  ${fmt(C.dim, `${qLen} tasks waiting`)}\n`);
-      }
-    });
+    // No spinner.pauseFor() needed — session mode has no \r animation
+    // Just print the queued confirmation and restore the › prompt
+    process.stdout.write('\r\x1b[2K');
+    process.stdout.write(
+      `  ${fmt(C.magenta, '↳')} ${fmt(C.bold, `[queued #${qLen}]`)} ${fmt(C.dim, line.slice(0, 70))}\n`
+    );
+    if (qLen > 1) {
+      process.stdout.write(`  ${fmt(C.dim, `${qLen} tasks waiting`)}\n`);
+    }
+    rl.prompt(true); // keep › visible
     return;
   }
 

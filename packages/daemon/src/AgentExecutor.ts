@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, relative } from 'node:path';
 import type { LLMExecutor, LLMMessage, LLMResponse } from './LLMExecutor.js';
+import type { KnowledgeGraph } from '@0agent/core';
 import { CapabilityRegistry } from './capabilities/index.js';
 
 export interface AgentResult {
@@ -33,7 +34,8 @@ export interface AgentExecutorConfig {
   cwd: string;
   max_iterations?: number;
   max_command_ms?: number;
-  agent_root?: string;   // path to 0agent source — injected for self-improvement tasks
+  agent_root?: string;     // path to 0agent source — injected for self-improvement tasks
+  graph?: KnowledgeGraph;  // knowledge graph — enables memory_write tool
 }
 
 // Self-modification trigger words — when detected, inject agent source path and extend timeout
@@ -56,7 +58,7 @@ export class AgentExecutor {
     this.maxIterations = config.max_iterations ?? 20;
     this.maxCommandMs = config.max_command_ms ?? 30_000;
     this.agentRoot = config.agent_root;
-    this.registry = new CapabilityRegistry();
+    this.registry = new CapabilityRegistry(undefined, config.graph);
   }
 
   async execute(task: string, systemContext?: string): Promise<AgentResult> {
@@ -83,23 +85,40 @@ export class AgentExecutor {
       this.onStep(i === 0 ? 'Thinking…' : 'Continuing…');
 
       let response: LLMResponse;
-      try {
-        response = await this.llm.completeWithTools(
-          messages,
-          this.registry.getToolDefinitions(),
-          systemPrompt,
-          // Only stream tokens on the final (non-tool) turn
-          (token) => {
-            this.onToken(token);
-            finalOutput += token;
-          },
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.onStep(`LLM error: ${msg}`);
-        finalOutput = `Error: ${msg}`;
-        break;
+      let llmFailed = false;
+      {
+        let llmRetry = 0;
+        while (true) {
+          try {
+            response = await this.llm.completeWithTools(
+              messages,
+              this.registry.getToolDefinitions(),
+              systemPrompt,
+              // Only stream tokens on the final (non-tool) turn
+              (token) => {
+                this.onToken(token);
+                finalOutput += token;
+              },
+            );
+            break; // success
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const isTimeout = /timeout|AbortError|aborted/i.test(msg);
+            if (isTimeout && llmRetry < 2) {
+              llmRetry++;
+              this.onStep(`LLM timeout — retrying (${llmRetry}/2)…`);
+              // Small backoff before retry
+              await new Promise(r => setTimeout(r, 2000 * llmRetry));
+              continue;
+            }
+            this.onStep(`LLM error: ${msg}`);
+            finalOutput = `Error: ${msg}`;
+            llmFailed = true;
+            break;
+          }
+        }
       }
+      if (llmFailed) break;
 
       totalTokens += response.tokens_used;
       modelName = response.model;
@@ -365,6 +384,8 @@ export class AgentExecutor {
   private buildSystemPrompt(extra?: string, task?: string): string {
     const isSelfMod = !!(task && SELF_MOD_PATTERN.test(task));
 
+    const hasMemory = !!this.config.graph;
+
     const lines = [
       `You are 0agent, an AI software engineer. You can execute shell commands and manage files.`,
       `Working directory: ${this.cwd}`,
@@ -375,12 +396,24 @@ export class AgentExecutor {
       `  cmd > /tmp/0agent-server.log 2>&1 &`,
       `  Example: python3 -m http.server 3000 > /tmp/0agent-server.log 2>&1 &`,
       `  NEVER run background commands without redirecting output.`,
-      `- For npm/node projects: check package.json first with read_file or list_dir`,
-      `- After write_file, verify with read_file if needed`,
+      `- To create a folder: use file_op with op="mkdir" and path="folder/name"`,
+      `- To create a file (and its parent folders): use file_op with op="write" — parent dirs are created automatically`,
+      `- For npm/node projects: check package.json first with file_op op="list"`,
+      `- After writing files, verify with file_op op="read" if needed`,
       `- After shell_exec, check output for errors and retry if needed`,
       `- For research tasks: use web_search first, then scrape_url for full page content`,
       `- Use relative paths from the working directory`,
       `- Be concise in your final response: state what was done and where to find it`,
+      ...(hasMemory ? [
+        ``,
+        `Memory (IMPORTANT):`,
+        `- ALWAYS call memory_write after discovering important facts:`,
+        `  · Live URLs (ngrok, deployed apps, APIs): memory_write({label:"ngrok_url", content:"https://...", type:"url"})`,
+        `  · Server ports: memory_write({label:"dev_server_port", content:"3000", type:"config"})`,
+        `  · File paths of created projects: memory_write({label:"project_path", content:"/path/to/project", type:"path"})`,
+        `  · Task outcomes: memory_write({label:"last_task_result", content:"...", type:"outcome"})`,
+        `- Call memory_write immediately when you find the value, not just at the end`,
+      ] : []),
     ];
 
     // Self-improvement context — injected when task is about modifying the agent itself

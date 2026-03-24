@@ -278,7 +278,16 @@ async function runInit() {
     }
   }
 
-  // ── Step 3: Embedding ────────────────────────────────────────────────────
+  // ── Step 3: Workspace folder ─────────────────────────────────────────────
+  const defaultWorkspace = resolve(homedir(), '0agent-workspace');
+  console.log(`\n  \x1b[1mWorkspace folder\x1b[0m`);
+  console.log(`  \x1b[2mAll files the agent creates will go here. You own it.\x1b[0m`);
+  const wsRaw = await ask(`  Path [${defaultWorkspace}]: `);
+  const workspacePath = wsRaw.trim() || defaultWorkspace;
+  mkdirSync(workspacePath, { recursive: true });
+  console.log(`  \x1b[32m✓\x1b[0m  Workspace: \x1b[36m${workspacePath}\x1b[0m`);
+
+  // ── Step 4: Embedding ────────────────────────────────────────────────────
   const embIdx = await arrowSelect('Embeddings (for semantic memory search)?', [
     'Local via Ollama (nomic-embed-text) — free, private',
     'OpenAI text-embedding-3-small — cloud',
@@ -286,12 +295,12 @@ async function runInit() {
   ], 0);
   const embeddingProvider = ['nomic-ollama', 'openai', 'none'][embIdx];
 
-  // ── Step 4: Sandbox ──────────────────────────────────────────────────────
+  // ── Step 5: Sandbox ──────────────────────────────────────────────────────
   const sandboxes = detectSandboxes();
   const sandboxChoice = sandboxes[0] ?? 'process';
   console.log(`\n  Sandbox: \x1b[32m${sandboxChoice}\x1b[0m detected`);
 
-  // ── Step 5: Seed graph ───────────────────────────────────────────────────
+  // ── Step 6: Seed graph ───────────────────────────────────────────────────
   const seedIdx = await arrowSelect('Starting knowledge?', [
     'software-engineering — sprint workflow + 15 skills  ← recommended',
     'Start from scratch',
@@ -300,11 +309,12 @@ async function runInit() {
 
   // ── Summary ───────────────────────────────────────────────────────────────
   console.log('\n  \x1b[1mReady to launch\x1b[0m\n');
-  console.log(`  LLM:     \x1b[36m${providerKey}/${model}\x1b[0m`);
-  console.log(`  API Key: ${apiKey ? '\x1b[32m✓ set\x1b[0m (' + apiKey.slice(0, 8) + '••••)' : '\x1b[33mnot set\x1b[0m'}`);
-  console.log(`  Memory:  ${ghToken ? `\x1b[32mgithub.com/${ghOwner}/0agent-memory\x1b[0m` : '\x1b[2mlocal only\x1b[0m'}`);
-  console.log(`  Sandbox: \x1b[36m${sandboxChoice}\x1b[0m`);
-  console.log(`  Seed:    \x1b[36m${seedName ?? 'scratch'}\x1b[0m\n`);
+  console.log(`  LLM:       \x1b[36m${providerKey}/${model}\x1b[0m`);
+  console.log(`  API Key:   ${apiKey ? '\x1b[32m✓ set\x1b[0m (' + apiKey.slice(0, 8) + '••••)' : '\x1b[33mnot set\x1b[0m'}`);
+  console.log(`  Memory:    ${ghToken ? `\x1b[32mgithub.com/${ghOwner}/0agent-memory\x1b[0m` : '\x1b[2mlocal only\x1b[0m'}`);
+  console.log(`  Workspace: \x1b[36m${workspacePath}\x1b[0m`);
+  console.log(`  Sandbox:   \x1b[36m${sandboxChoice}\x1b[0m`);
+  console.log(`  Seed:      \x1b[36m${seedName ?? 'scratch'}\x1b[0m\n`);
 
   // Write config
   const dbPath    = resolve(AGENT_DIR, 'graph.db');
@@ -328,6 +338,9 @@ embedding:
 
 sandbox:
   backend: ${sandboxChoice}
+
+workspace:
+  path: "${workspacePath}"
 
 mcp_servers: []
 
@@ -356,11 +369,20 @@ ${ghToken && ghOwner ? `\ngithub_memory:\n  enabled: true\n  token: "${ghToken}"
     console.log('  ✓ Built-in skills installed');
   }
 
-  // Always kill any existing daemon so the new config (with API key) is loaded
-  try { stopDaemon(); await sleep(800); } catch {}
+  // Force-kill any running daemon so new config is loaded fresh
+  await forceStopDaemon();
 
-  console.log('\n  Starting daemon...\n');
+  // Start fresh daemon with new config
+  console.log('\n  Starting...');
   await startDaemon();
+
+  // Open chat TUI immediately — no manual steps needed
+  const chatSc = resolve(dirname(new URL(import.meta.url).pathname), 'chat.js');
+  if (existsSync(chatSc)) {
+    const { spawn: sp } = await import('node:child_process');
+    const p = sp(process.execPath, [chatSc], { stdio: 'inherit' });
+    await new Promise(r => p.on('close', r));
+  }
 }
 
 function detectSandboxes() {
@@ -378,9 +400,17 @@ function detectSandboxes() {
 // ─── Daemon lifecycle ─────────────────────────────────────────────────────
 
 async function startDaemon() {
+  // If still running (e.g. stop was called just before), wait a bit
   if (await isDaemonRunning()) {
-    console.log('  Daemon already running on port 4200. Run `0agent status`.');
-    return;
+    // Give it up to 3s to die before giving up
+    for (let i = 0; i < 6; i++) {
+      await sleep(500);
+      if (!await isDaemonRunning()) break;
+    }
+    if (await isDaemonRunning()) {
+      console.log('  Daemon already running on port 4200. Run `0agent status`.');
+      return;
+    }
   }
 
   if (!existsSync(CONFIG_PATH)) {
@@ -410,33 +440,42 @@ async function startDaemon() {
   child.unref();
 
   // Wait for daemon to be ready (poll /api/health)
-  process.stdout.write('  Starting');
   for (let i = 0; i < 30; i++) {
     await sleep(500);
-    process.stdout.write('.');
     if (await isDaemonRunning()) {
-      console.log(' ✓\n');
-      console.log(`  Daemon running on http://localhost:4200`);
-      console.log(`  Dashboard: http://localhost:4200`);
-      console.log(`  Run: 0agent run "your task"\n`);
+      process.stdout.write(`  \x1b[32m✓\x1b[0m Daemon ready\n`);
       return;
     }
   }
-  console.log('\n  Daemon did not start. Check logs: 0agent logs');
+  console.log('  Daemon did not start in time. Check: 0agent logs');
 }
 
 function stopDaemon() {
-  if (!existsSync(PID_PATH)) {
+  // Try PID file first
+  if (existsSync(PID_PATH)) {
+    const pid = parseInt(readFileSync(PID_PATH, 'utf8').trim(), 10);
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+  } else {
     console.log('  No daemon PID file found. Is it running?');
-    return;
   }
-  const pid = parseInt(readFileSync(PID_PATH, 'utf8').trim(), 10);
-  try {
-    process.kill(pid, 'SIGTERM');
-    console.log(`  Sent SIGTERM to daemon (pid ${pid}). Shutting down...`);
-  } catch (e) {
-    console.log(`  Could not stop daemon: ${e instanceof Error ? e.message : e}`);
+  // Also kill by process name as a fallback
+  try { execSync('pkill -f "daemon.mjs" 2>/dev/null; true', { stdio: 'ignore' }); } catch {}
+}
+
+// Forcefully kill any running daemon regardless of PID file state.
+// Used after init to ensure fresh config is picked up.
+async function forceStopDaemon() {
+  // Kill by PID file if present
+  if (existsSync(PID_PATH)) {
+    const pid = parseInt(readFileSync(PID_PATH, 'utf8').trim(), 10);
+    try { process.kill(pid, 'SIGTERM'); } catch {}
   }
+  // Kill by process name (catches daemons started by chat.js or other means)
+  try { execSync('pkill -f "daemon.mjs" 2>/dev/null; true', { stdio: 'ignore' }); } catch {}
+  // Kill by port 4200 (last resort)
+  try { execSync('lsof -ti:4200 | xargs kill -9 2>/dev/null; true', { stdio: 'ignore' }); } catch {}
+  // Wait for port to be free
+  await sleep(1200);
 }
 
 async function showStatus() {

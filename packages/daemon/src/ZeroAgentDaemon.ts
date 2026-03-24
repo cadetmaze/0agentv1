@@ -152,7 +152,16 @@ export class ZeroAgentDaemon {
     }
 
     // 5.5 — Collab-1: initialize user identity + project context
-    const cwd = process.env['ZEROAGENT_CWD'] ?? process.cwd();
+    // Workspace path: env override → config → process.cwd()
+    const workspaceCfg = (this.config as Record<string, unknown>)['workspace'] as
+      { path?: string } | undefined;
+    const configuredWorkspace = workspaceCfg?.path;
+    const cwd = process.env['ZEROAGENT_CWD'] ?? configuredWorkspace ?? process.cwd();
+    if (configuredWorkspace) {
+      const { mkdirSync: mks } = await import('node:fs');
+      mks(configuredWorkspace, { recursive: true });
+      console.log(`[0agent] Workspace: ${configuredWorkspace}`);
+    }
     const identityManager = new IdentityManager(this.graph);
     const identity = await identityManager.init().catch(() => null);
     if (identity) {

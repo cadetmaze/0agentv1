@@ -1,9 +1,11 @@
 import type { Capability, CapabilityResult, ToolDefinition } from './types.js';
+import type { KnowledgeGraph } from '@0agent/core';
 import { WebSearchCapability } from './WebSearchCapability.js';
 import { BrowserCapability } from './BrowserCapability.js';
 import { ScraperCapability } from './ScraperCapability.js';
 import { ShellCapability } from './ShellCapability.js';
 import { FileCapability } from './FileCapability.js';
+import { MemoryCapability } from './MemoryCapability.js';
 
 export class CapabilityRegistry {
   private capabilities = new Map<string, Capability>();
@@ -18,7 +20,7 @@ export class CapabilityRegistry {
    * task_type: browser_task). The main agent does NOT have direct access
    * to browser_open without going through a subagent spawn.
    */
-  constructor(codespaceManager?: unknown) {
+  constructor(codespaceManager?: unknown, graph?: KnowledgeGraph) {
     this.register(new WebSearchCapability());
 
     // Browser capability: use Codespace if available, otherwise local Chrome
@@ -36,6 +38,11 @@ export class CapabilityRegistry {
     this.register(new ScraperCapability());
     this.register(new ShellCapability());
     this.register(new FileCapability());
+
+    // Memory capability — only available when graph is connected
+    if (graph) {
+      this.register(new MemoryCapability(graph));
+    }
   }
 
   register(cap: Capability): void {

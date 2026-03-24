@@ -341,7 +341,7 @@ export class SessionManager {
       if (activeLLM?.isConfigured) {
         const executor = new AgentExecutor(
           activeLLM,
-          { cwd: this.cwd, agent_root: this.agentRoot },
+          { cwd: this.cwd, agent_root: this.agentRoot, graph: this.graph },
           // step callback → emit session.step events
           (step) => this.addStep(sessionId, step),
           // token callback → emit session.token events
