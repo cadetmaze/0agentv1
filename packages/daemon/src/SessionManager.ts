@@ -382,13 +382,21 @@ export class SessionManager {
             : undefined,
         ].filter(Boolean).join('\n\n') || undefined;
 
-        // Use SelfHealLoop if available (Collab-2), otherwise bare executor
+        // Use SelfHealLoop if available (Collab-2), otherwise bare executor.
+        // CRITICAL: pass full config including graph + onMemoryWrite so
+        // memory_write tool is available and the callback chain works.
+        const fullConfig = {
+          cwd: this.cwd,
+          agent_root: this.agentRoot,
+          graph: this.graph,
+          onMemoryWrite: this.onMemoryWritten,
+        };
         let agentResult: Awaited<ReturnType<typeof executor.execute>>;
         try {
           const { SelfHealLoop } = await import('./SelfHealLoop.js');
           const healLoop = new SelfHealLoop(
             activeLLM,
-            { cwd: this.cwd, agent_root: this.agentRoot },
+            fullConfig,
             (step) => this.addStep(sessionId, step),
             (token) => this.emit({ type: 'session.token', session_id: sessionId, token }),
           );
@@ -449,8 +457,39 @@ export class SessionManager {
         }
         this.addStep(sessionId, `Done (${agentResult.tokens_used} tokens, ${agentResult.iterations} LLM turns)`);
 
+        // ── Guaranteed baseline write: session summary always hits the graph ──
+        // This fires even if the LLM extraction below fails, ensuring SOMETHING
+        // is always written so the graph updates are visible at localhost:4200.
+        if (this.graph) {
+          try {
+            const nodeId = `memory:session_${sessionId.slice(0, 8)}`;
+            const label  = enrichedReq.task.slice(0, 80);
+            const existing = this.graph.getNode(nodeId);
+            const meta = {
+              task:       enrichedReq.task.slice(0, 300),
+              output:     agentResult.output.slice(0, 300),
+              type:       'session_summary',
+              tokens:     agentResult.tokens_used,
+              saved_at:   new Date().toISOString(),
+            };
+            if (existing) {
+              this.graph.updateNode(nodeId, { label, metadata: meta });
+            } else {
+              this.graph.addNode(createNode({
+                id: nodeId, graph_id: 'root', label, type: NodeType.CONTEXT, metadata: meta,
+              }));
+            }
+            console.log(`[0agent] Graph: wrote session summary node (${nodeId})`);
+            this.onMemoryWritten?.();
+          } catch (err) {
+            console.warn('[0agent] Graph: baseline write failed:', err instanceof Error ? err.message : err);
+          }
+        }
+
         // Extract and persist factual entities from this conversation to long-term memory
-        this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM).catch(() => {});
+        this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM).catch((err) => {
+          console.warn('[0agent] Memory extraction outer error:', err instanceof Error ? err.message : err);
+        });
 
         this.completeSession(sessionId, {
           output: agentResult.output,

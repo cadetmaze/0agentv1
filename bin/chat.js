@@ -31,6 +31,7 @@ const SLASH_COMMANDS = [
   { cmd: '/security-audit',desc: 'Security audit — find vulnerabilities'           },
   { cmd: '/design-review', desc: 'Design review — architecture and patterns'       },
   // Built-ins
+  { cmd: '/memory',        desc: 'Show graph nodes and force-push to GitHub'        },
   { cmd: '/telegram',      desc: 'Connect Telegram bot — forward messages to 0agent'},
   { cmd: '/model',         desc: 'Show or switch the LLM model'                   },
   { cmd: '/key',           desc: 'Update a stored API key'                         },
@@ -898,6 +899,50 @@ async function handleCommand(input) {
         console.log(`  ${fmt(C.green, '✓')} Resumed ${id}\n`);
       } else {
         console.log('  Usage: /schedule list | add "<task>" <schedule> | delete <id> | pause <id> | resume <id>\n');
+      }
+      break;
+    }
+
+    // /memory — inspect graph nodes + force GitHub sync
+    case '/memory': {
+      try {
+        const sub = parts[1]?.toLowerCase();
+
+        if (sub === 'sync' || sub === 'push') {
+          process.stdout.write(`  ${fmt(C.dim, 'Pushing to GitHub...')}\n`);
+          const res = await fetch(`${BASE_URL}/api/memory/push`, { method: 'POST' }).catch(() => null);
+          const data = res?.ok ? await res.json().catch(() => null) : null;
+          if (data?.pushed) {
+            console.log(`  ${fmt(C.green, '✓')} Pushed ${data.nodes_synced} nodes, ${data.edges_synced} edges to GitHub\n`);
+          } else {
+            console.log(`  ${fmt(C.yellow, '⚠')} ${data?.error ?? 'Sync not configured or failed'}\n`);
+          }
+          break;
+        }
+
+        // Show memory nodes from graph
+        const res = await fetch(`${BASE_URL}/api/graph/nodes?limit=200`).then(r => r.json()).catch(() => []);
+        const nodes = Array.isArray(res) ? res : [];
+        const memNodes = nodes.filter(n => n.id?.startsWith('memory:') || n.type === 'context');
+        const total    = nodes.length;
+
+        console.log(`\n  ${fmt(C.bold, 'Knowledge graph')} — ${total} nodes total, ${memNodes.length} memory nodes\n`);
+
+        if (memNodes.length === 0) {
+          console.log(`  ${fmt(C.dim, 'No memory nodes yet. Run a task — the agent will write facts here.')}\n`);
+        } else {
+          for (const n of memNodes.slice(0, 20)) {
+            const content = n.metadata?.content ?? n.label;
+            const type    = n.metadata?.type ?? n.type;
+            console.log(`  ${fmt(C.cyan, n.label.padEnd(28))} ${fmt(C.dim, String(content).slice(0, 50))}`);
+            console.log(`  ${fmt(C.dim, `  ${n.id}  [${type}]`)}`);
+          }
+          if (memNodes.length > 20) console.log(fmt(C.dim, `\n  …and ${memNodes.length - 20} more`));
+        }
+        console.log();
+        console.log(`  ${fmt(C.dim, 'Force sync: /memory sync  ·  Dashboard: http://localhost:4200')}\n`);
+      } catch {
+        console.log(`  ${fmt(C.red, '✗')} Daemon not running\n`);
       }
       break;
     }

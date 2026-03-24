@@ -205,14 +205,19 @@ export class ZeroAgentDaemon {
       projectContext: projectContext ?? undefined,
       adapter: this.adapter,
       agentRoot,   // agent source path — self-improvement tasks read the right files
-      // Push to GitHub immediately when facts are extracted from a session
+      // Push to GitHub immediately when facts are written to the graph
       onMemoryWritten: () => {
         this.githubMemorySync?.markDirty();
-        // Also push immediately (don't wait for 2-min timer)
         if (this.githubMemorySync) {
           this.githubMemorySync.push('sync: new facts learned').then(r => {
-            if (r.pushed) console.log(`[0agent] Memory pushed: ${r.nodes_synced} nodes → github`);
-          }).catch(() => {});
+            if (r.pushed) {
+              console.log(`[0agent] Memory pushed: ${r.nodes_synced} nodes, ${r.edges_synced} edges → github`);
+            } else if (r.error) {
+              console.warn(`[0agent] Memory push failed: ${r.error}`);
+            }
+          }).catch(err => {
+            console.warn('[0agent] Memory push exception:', err instanceof Error ? err.message : err);
+          });
         }
       },
     });
@@ -226,9 +231,14 @@ export class ZeroAgentDaemon {
     if (this.githubMemorySync) {
       const memSync = this.githubMemorySync;
       this.memorySyncTimer = setInterval(async () => {
-        const result = await memSync.push().catch(() => null);
-        if (result?.pushed && result.nodes_synced > 0) {
-          console.log(`[0agent] Memory synced: ${result.nodes_synced} nodes → github`);
+        const result = await memSync.push().catch(err => {
+          console.warn('[0agent] Memory timer push failed:', err instanceof Error ? err.message : err);
+          return null;
+        });
+        if (result?.pushed) {
+          console.log(`[0agent] Memory sync: ${result.nodes_synced} nodes → github`);
+        } else if (result?.error) {
+          console.warn(`[0agent] Memory sync error: ${result.error}`);
         }
       }, 2 * 60 * 1000); // 2 minutes
       if (typeof this.memorySyncTimer === 'object') (this.memorySyncTimer as any).unref?.();
