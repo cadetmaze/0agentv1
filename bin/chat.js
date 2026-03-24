@@ -1192,7 +1192,14 @@ process.stdin.on('keypress', (_char, key) => {
     sessionId      = null;
     streaming      = false;
     streamLineCount = 0;
-    messageQueue.length = 0; // also clear queue — fresh start
+    messageQueue.length = 0;
+
+    // Kill any OS-level processes spawned by GUI/shell capabilities
+    // (python3 GUI scripts, bash subprocesses) so nothing keeps running
+    import('node:child_process').then(({ execSync: _exec }) => {
+      try { _exec('pkill -f "0agent_gui_" 2>/dev/null; pkill -f "0agent-bg-" 2>/dev/null; true', { stdio: 'ignore' }); } catch {}
+    }).catch(() => {});
+
     res();
     rl.prompt();
   }

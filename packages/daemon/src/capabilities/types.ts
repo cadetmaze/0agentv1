@@ -24,7 +24,7 @@ export interface Capability {
   readonly name: string;
   readonly description: string;
   readonly toolDefinition: ToolDefinition;
-  execute(input: Record<string, unknown>, cwd: string): Promise<CapabilityResult>;
+  execute(input: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<CapabilityResult>;
 }
 
 export interface ToolDefinition {

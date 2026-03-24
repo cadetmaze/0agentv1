@@ -59,13 +59,13 @@ export class CapabilityRegistry {
     return [...this.capabilities.values()].map(c => c.toolDefinition);
   }
 
-  async execute(toolName: string, input: Record<string, unknown>, cwd: string): Promise<CapabilityResult> {
+  async execute(toolName: string, input: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<CapabilityResult> {
     const cap = this.capabilities.get(toolName);
     if (!cap) {
       return { success: false, output: `Unknown capability: ${toolName}`, duration_ms: 0 };
     }
     try {
-      return await cap.execute(input, cwd);
+      return await cap.execute(input, cwd, signal);
     } catch (err) {
       return {
         success: false,

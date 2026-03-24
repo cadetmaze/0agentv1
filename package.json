@@ -1,6 +1,6 @@
 {
   "name": "0agent",
-  "version": "1.0.54",
+  "version": "1.0.55",
   "description": "A persistent, learning AI agent that runs on your machine. An agent that learns.",
   "private": false,
   "license": "Apache-2.0",
@@ -21,6 +21,7 @@
     "test": "turbo run test",
     "lint": "turbo run lint",
     "postinstall": "node bin/postinstall.js",
+    "preuninstall": "node bin/preuninstall.js",
     "prepublishOnly": "pnpm build --filter='!@0agent/dashboard' --filter='!@0agent/core-native' && node scripts/bundle.mjs"
   },
   "dependencies": {

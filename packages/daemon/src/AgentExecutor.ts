@@ -151,7 +151,7 @@ export class AgentExecutor {
 
         let result: string;
         try {
-          const capResult = await this.registry.execute(tc.name, tc.input, this.cwd);
+          const capResult = await this.registry.execute(tc.name, tc.input, this.cwd, signal);
           result = capResult.output;
           if (capResult.fallback_used) {
             this.onStep(`  (used fallback: ${capResult.fallback_used})`);

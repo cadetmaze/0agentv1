@@ -24,7 +24,7 @@
  */
 
 import type { Capability, CapabilityResult, ToolDefinition } from './types.js';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir, platform } from 'node:os';
@@ -70,7 +70,7 @@ export class GUICapability implements Capability {
     },
   };
 
-  async execute(input: Record<string, unknown>, _cwd: string): Promise<CapabilityResult> {
+  async execute(input: Record<string, unknown>, _cwd: string, signal?: AbortSignal): Promise<CapabilityResult> {
     const action = String(input.action ?? '').toLowerCase().trim();
     const start  = Date.now();
 
@@ -79,21 +79,61 @@ export class GUICapability implements Capability {
       return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, open_url, open_app`, duration_ms: 0 };
     }
 
-    // Write to a temp file so we don't hit inline quoting limits
+    if (signal?.aborted) {
+      return { success: false, output: 'Cancelled.', duration_ms: 0 };
+    }
+
     const tmpFile = resolve(tmpdir(), `0agent_gui_${Date.now()}.py`);
     writeFileSync(tmpFile, script, 'utf8');
 
-    const result = spawnSync('python3', [tmpFile], { timeout: 30_000, encoding: 'utf8' });
+    // Run python3 asynchronously so ESC (AbortSignal) can kill the process
+    const runPy = (file: string): Promise<{ stdout: string; stderr: string; code: number | null }> =>
+      new Promise((res) => {
+        const proc = spawn('python3', [file], { env: process.env });
+        const out: string[] = [];
+        const err: string[] = [];
+        let settled = false;
+
+        const finish = (code: number | null) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', onAbort);
+          clearTimeout(timer);
+          res({ stdout: out.join(''), stderr: err.join(''), code });
+        };
+
+        const onAbort = () => {
+          try { proc.kill('SIGKILL'); } catch {}
+          finish(null);
+        };
+
+        signal?.addEventListener('abort', onAbort, { once: true });
+        proc.stdout.on('data', (d: Buffer) => out.push(d.toString()));
+        proc.stderr.on('data', (d: Buffer) => err.push(d.toString()));
+        proc.on('exit', finish);
+        proc.on('error', () => finish(-1));
+
+        const timer = setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch {}
+          finish(null);
+        }, 30_000);
+      });
+
+    let result = await runPy(tmpFile);
     try { unlinkSync(tmpFile); } catch {}
 
-    if (result.status !== 0) {
-      const err = String(result.stderr ?? '').trim();
+    if (signal?.aborted) {
+      return { success: false, output: 'Cancelled.', duration_ms: Date.now() - start };
+    }
+
+    if (result.code !== 0 && result.code !== null) {
+      const err = result.stderr.trim();
 
       // Auto-install pyautogui on first use
-      if (err.includes('No module named') || err.includes("ModuleNotFoundError")) {
+      if (err.includes('No module named') || err.includes('ModuleNotFoundError')) {
         const missing = err.includes('pyautogui') ? 'pyautogui pillow pytesseract'
-          : err.includes('PIL')        ? 'pillow'
-          : err.includes('tesseract')  ? 'pytesseract'
+          : err.includes('PIL')       ? 'pillow'
+          : err.includes('tesseract') ? 'pytesseract'
           : 'pyautogui pillow';
 
         const install = spawnSync('pip3', ['install', ...missing.split(' '), '-q'], {
@@ -102,16 +142,15 @@ export class GUICapability implements Capability {
         if (install.status !== 0) {
           return { success: false, output: `Auto-install failed: ${install.stderr?.slice(0, 200)}. Run: pip3 install ${missing}`, duration_ms: Date.now() - start };
         }
+
         // Retry after install
-        const retry = spawnSync('python3', [tmpFile], { timeout: 30_000, encoding: 'utf8' });
-        // tmpFile was already deleted; rewrite
         writeFileSync(tmpFile, script, 'utf8');
-        const retry2 = spawnSync('python3', [tmpFile], { timeout: 30_000, encoding: 'utf8' });
+        result = await runPy(tmpFile);
         try { unlinkSync(tmpFile); } catch {}
-        if (retry2.status === 0) {
-          return { success: true, output: retry2.stdout.trim() || 'Done', duration_ms: Date.now() - start };
-        }
-        return { success: false, output: retry2.stderr?.trim() || 'Unknown error after install', duration_ms: Date.now() - start };
+
+        if (signal?.aborted) return { success: false, output: 'Cancelled.', duration_ms: Date.now() - start };
+        if (result.code === 0) return { success: true, output: result.stdout.trim() || 'Done', duration_ms: Date.now() - start };
+        return { success: false, output: result.stderr.trim() || 'Unknown error after install', duration_ms: Date.now() - start };
       }
 
       // macOS accessibility permission error
@@ -341,12 +380,41 @@ chrome_running = subprocess.run(['pgrep', '-x', 'Google Chrome'], capture_output
 firefox_running = subprocess.run(['pgrep', '-x', 'firefox'], capture_output=True).returncode == 0
 safari_running  = subprocess.run(['pgrep', '-x', 'Safari'], capture_output=True).returncode == 0
 
+import urllib.parse
+domain = urllib.parse.urlparse(url).netloc
+
 if chrome_running:
-    # Open in existing Chrome window — no new window created
-    script = f'tell application "Google Chrome" to open location "{url}"'
-    subprocess.run(['osascript', '-e', script])
-    subprocess.run(['osascript', '-e', 'tell application "Google Chrome" to activate'])
-    print(f"Navigated Chrome to: {url}")
+    # Check if URL domain is already open in an existing tab — switch to it instead of opening new tab
+    check_script = f"""
+tell application "Google Chrome"
+  set foundTab to false
+  repeat with w in every window
+    set tabIdx to 1
+    repeat with t in every tab of w
+      if URL of t contains "{domain}" then
+        set active tab index of w to tabIdx
+        set index of w to 1
+        set foundTab to true
+        exit repeat
+      end if
+      set tabIdx to tabIdx + 1
+    end repeat
+    if foundTab then exit repeat
+  end repeat
+  if foundTab then
+    activate
+    return "switched"
+  else
+    tell front window to make new tab with properties {{URL:"{url}"}}
+    activate
+    return "new-tab"
+  end if
+end tell"""
+    r = subprocess.run(['osascript', '-e', check_script], capture_output=True, text=True)
+    if r.stdout.strip() == "switched":
+        print(f"Switched to existing Chrome tab: {url}")
+    else:
+        print(f"Opened new Chrome tab: {url}")
 elif firefox_running:
     script = f'tell application "Firefox" to open location "{url}"'
     subprocess.run(['osascript', '-e', script])
