@@ -414,19 +414,20 @@ print("Typed successfully")
           }).filter(Boolean).join(', ');
           const usingClause = modifiers ? ` using {${modifiers}}` : '';
 
-          // Use key code for special keys, keystroke for regular characters
+          // Use key code for special keys, keystroke for regular characters.
+          // Send to frontmost app (not tell process) — activate app first so it has focus.
+          // tell process can silently fail if process name doesn't match exactly.
           const keyStatement = keyCode !== undefined
             ? `key code ${keyCode}${usingClause}`
             : `keystroke "${mainKey}"${usingClause}`;
 
           return header + `
 import subprocess, time
+# Activate app to give it OS focus, then send key to frontmost (whatever has focus)
 subprocess.run(['osascript', '-e', 'tell application "${safeApp}" to activate'], capture_output=True)
-time.sleep(0.3)
+time.sleep(0.5)
 as_script = """tell application "System Events"
-  tell process "${safeApp}"
-    ${keyStatement}
-  end tell
+  ${keyStatement}
 end tell"""
 r = subprocess.run(['osascript', '-e', as_script], capture_output=True, text=True)
 if r.returncode == 0:
