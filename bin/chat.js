@@ -40,6 +40,8 @@ const SLASH_COMMANDS = [
   { cmd: '/schedule',      desc: 'Manage scheduled / recurring tasks'              },
   { cmd: '/update',        desc: 'Update 0agent to the latest version'             },
   { cmd: '/graph',         desc: 'Open 3D knowledge graph in browser'              },
+  { cmd: '/voice',         desc: 'Start voice mode (Whisper STT + TTS)'            },
+  { cmd: '/surfaces',      desc: 'Show connected surfaces (Telegram, Slack, etc.)' },
   { cmd: '/clear',         desc: 'Clear the screen'                                },
   { cmd: '/help',          desc: 'Show this help'                                  },
 ];
@@ -586,7 +588,10 @@ function handleWsEvent(event) {
 
       const r       = event.result ?? {};
       const elapsed = sessionStartMs ? `${((Date.now() - sessionStartMs) / 1000).toFixed(1)}s` : '';
-      const cost    = estimateCost(r.model, r.tokens_used);
+      // Use precise cost from agent when available, fallback to blended estimate
+      const cost    = r.cost_usd > 0
+        ? (r.cost_usd < 0.01 ? ' · <$0.01' : ` · $${r.cost_usd.toFixed(3)}`)
+        : estimateCost(r.model, r.tokens_used);
 
       if (r.files_written?.length)
         console.log(`\n  ${fmt(C.green, '✓')} ${r.files_written.join(', ')}`);
@@ -1108,6 +1113,43 @@ async function handleCommand(input) {
       break;
     }
 
+    // /voice — launch voice mode
+    case '/voice': {
+      console.log(`\n  ${fmt(C.green, '🎙️')} Launching voice mode…`);
+      console.log(`  ${fmt(C.dim, 'Requires: pip install openai-whisper  +  brew install sox\n')}`);
+      try {
+        const { spawn: spawnVoice } = await import('node:child_process');
+        const voiceModel = parts[1] ?? 'base';
+        const proc = spawnVoice(process.execPath, [process.argv[1], '--voice', `--voice-model=${voiceModel}`], {
+          stdio: 'inherit',
+        });
+        await new Promise(r => proc.on('close', r));
+      } catch (e) {
+        console.log(`  ${fmt(C.red, '✗')} ${e.message}\n`);
+      }
+      break;
+    }
+
+    // /surfaces — show configured surfaces
+    case '/surfaces': {
+      console.log('\n  Connected surfaces:\n');
+      const surCfg = cfg?.surfaces ?? {};
+      const checks = [
+        { name: 'Telegram', key: 'telegram', check: c => c?.token?.length > 10 },
+        { name: 'Slack',    key: 'slack',    check: c => c?.bot_token?.length > 5 },
+        { name: 'WhatsApp', key: 'whatsapp', check: c => c?.provider },
+        { name: 'Voice',    key: 'voice',    check: c => c?.enabled },
+        { name: 'Meeting',  key: 'meeting',  check: c => c?.enabled },
+      ];
+      for (const { name, key, check } of checks) {
+        const configured = check(surCfg[key]);
+        const icon = configured ? fmt(C.green, '✓') : fmt(C.dim, '○');
+        console.log(`  ${icon}  ${name.padEnd(12)} ${configured ? fmt(C.green, 'configured') : fmt(C.dim, 'not configured')}`);
+      }
+      console.log(`\n  ${fmt(C.dim, 'Edit ~/.0agent/config.yaml → surfaces: { telegram, slack, whatsapp, voice, meeting }')}\n`);
+      break;
+    }
+
     // /graph
     case '/graph': {
       console.log(`  ${fmt(C.cyan, 'Knowledge graph:')} ${fmt(C.dim, 'http://localhost:4200')}\n`);
@@ -1373,7 +1415,138 @@ async function _safeJsonFetch(url, opts) {
   catch { return { status: res.status, data: null, raw: text }; }
 }
 
+// ─── Voice mode (--voice flag) ───────────────────────────────────────────────
+
+const VOICE_MODE = process.argv.includes('--voice');
+
+async function runVoiceMode() {
+  const { spawnSync, execSync, spawn } = await import('node:child_process');
+  const { existsSync: fsExists, mkdirSync: fsMk, writeFileSync: fsWrite, readFileSync: fsRead } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join: pathJoin } = await import('node:path');
+
+  // Check whisper
+  const whisperBin = ['whisper', 'faster-whisper'].find(b => {
+    try { return spawnSync(b, ['--help'], { timeout: 2000, stdio: 'pipe' }).status !== null; } catch { return false; }
+  });
+  if (!whisperBin) {
+    console.log(`  ${fmt(C.red, '✗')} Whisper not found. Install: ${fmt(C.bold, 'pip install openai-whisper')}`);
+    process.exit(1);
+  }
+
+  // Check sox or ffmpeg for recording
+  const recorderBin = ['sox', 'ffmpeg'].find(b => {
+    try { return spawnSync(b, ['--version'], { timeout: 2000, stdio: 'pipe' }).status !== null; } catch { return false; }
+  });
+  if (!recorderBin) {
+    console.log(`  ${fmt(C.red, '✗')} sox or ffmpeg not found. Install: ${fmt(C.bold, 'brew install sox')}`);
+    process.exit(1);
+  }
+
+  const voiceModel = process.argv.find(a => a.startsWith('--voice-model='))?.split('=')[1] ?? 'base';
+  const tmpDir = pathJoin(tmpdir(), '0agent-voice');
+  fsMk(tmpDir, { recursive: true });
+
+  console.log(`\n  ${fmt(C.green, '🎙️')} ${fmt(C.bold, 'Voice mode')} (Whisper ${voiceModel})`);
+  console.log(`  ${fmt(C.dim, 'Press Enter to start/stop recording. Ctrl+C to quit.\n')}`);
+
+  function recordAudio(outPath, seconds) {
+    if (recorderBin === 'sox') {
+      return spawnSync('sox', ['-d', '-r', '16000', '-c', '1', '-b', '16', outPath, 'trim', '0', String(seconds)],
+        { timeout: (seconds + 5) * 1000, stdio: 'pipe' });
+    }
+    const platform = process.platform;
+    const deviceArgs = platform === 'darwin'
+      ? ['-f', 'avfoundation', '-i', ':0']
+      : ['-f', 'alsa', '-i', 'default'];
+    return spawnSync('ffmpeg', ['-y', ...deviceArgs, '-ar', '16000', '-ac', '1', '-t', String(seconds), outPath],
+      { timeout: (seconds + 5) * 1000, stdio: 'pipe' });
+  }
+
+  function transcribe(audioPath) {
+    try {
+      const cmd = whisperBin === 'faster-whisper'
+        ? `faster-whisper "${audioPath}" --model ${voiceModel} --output_format txt --output_dir "${tmpDir}"`
+        : `whisper "${audioPath}" --model ${voiceModel} --output_format txt --output_dir "${tmpDir}" --fp16 False`;
+      execSync(cmd, { timeout: 120_000, stdio: 'pipe' });
+      const txtPath = audioPath.replace(/\.[^.]+$/, '.txt');
+      if (fsExists(txtPath)) return fsRead(txtPath, 'utf8').trim();
+      return null;
+    } catch { return null; }
+  }
+
+  function speak(text) {
+    const cleaned = text
+      .replace(/```[\s\S]*?```/g, 'code block')
+      .replace(/`[^`]+`/g, '').replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/#+\s*/g, '').replace(/\n/g, ' ').trim();
+    if (!cleaned) return;
+    if (process.platform === 'darwin') {
+      spawn('say', ['-r', '175', cleaned], { stdio: 'ignore', detached: true }).unref();
+    } else {
+      spawn('espeak', [cleaned], { stdio: 'ignore', detached: true }).unref();
+    }
+  }
+
+  const rl2 = createInterface({ input: process.stdin, output: process.stdout });
+  console.log(`  ${fmt(C.dim, '↩  press Enter to record (5 seconds)')}`);
+  rl2.prompt();
+
+  rl2.on('line', async () => {
+    const outPath = pathJoin(tmpDir, `voice-${Date.now()}.wav`);
+    process.stdout.write(`  ${fmt(C.red, '●')} Recording (5s)…\n`);
+    recordAudio(outPath, 5);
+    if (!fsExists(outPath)) {
+      process.stdout.write(`  ${fmt(C.yellow, '!')} Could not record. Check microphone.\n`);
+      rl2.prompt(); return;
+    }
+    process.stdout.write(`  ${fmt(C.dim, '⏳ Transcribing…')}\n`);
+    const transcript = transcribe(outPath);
+    if (!transcript) {
+      process.stdout.write(`  ${fmt(C.yellow, '!')} Could not transcribe.\n`);
+      rl2.prompt(); return;
+    }
+    process.stdout.write(`  ${fmt(C.cyan, '🎤')} "${fmt(C.bold, transcript)}"\n`);
+
+    // Run as agent task
+    try {
+      const res = await fetch(`${BASE_URL}/api/sessions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: transcript, context: { surface: 'voice', is_chat: true } }),
+        signal: AbortSignal.timeout(5000),
+      });
+      const session = await res.json();
+      const sid = session.session_id ?? session.id;
+      if (!sid) { process.stdout.write(`  ${fmt(C.red, '✗')} Session error\n`); rl2.prompt(); return; }
+
+      // Poll for result
+      let output = '';
+      for (let i = 0; i < 120; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        const r = await fetch(`${BASE_URL}/api/sessions/${sid}`, { signal: AbortSignal.timeout(3000) });
+        const s = await r.json();
+        if (s.status === 'completed') { output = s.result?.output ?? ''; break; }
+        if (s.status === 'failed' || s.status === 'cancelled') break;
+      }
+      if (output) {
+        process.stdout.write(`\n  ${fmt(C.green, '🤖')} ${output}\n\n`);
+        speak(output);
+      }
+    } catch (e) {
+      process.stdout.write(`  ${fmt(C.red, '✗')} ${e.message}\n`);
+    }
+    rl2.prompt();
+  });
+
+  rl2.on('close', () => process.exit(0));
+}
+
 (async () => {
+  if (VOICE_MODE) {
+    await runVoiceMode();
+    return;
+  }
+
   const startSpin = new Spinner('Starting daemon');
 
   // Step 1: Check if daemon is running AND up-to-date (has /api/llm/ping)
@@ -1632,7 +1805,7 @@ function isNewerVersion(a, b) {
 // Only these exact prefixes are built-in commands handled by handleCommand().
 // Everything else starting with '/' is a skill → routed to runTask().
 const COMMAND_PREFIXES = ['/model','/key','/status','/skills','/graph','/clear',
-  '/help','/schedule','/update','/telegram'];
+  '/help','/schedule','/update','/telegram','/voice','/surfaces'];
 
 async function executeInput(line) {
   const isCmd = COMMAND_PREFIXES.some(c => line === c || line.startsWith(c + ' '));

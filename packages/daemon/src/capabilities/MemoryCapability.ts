@@ -1,6 +1,6 @@
 import type { Capability, CapabilityResult, ToolDefinition } from './types.js';
 import type { KnowledgeGraph } from '@0agent/core';
-import { NodeType, createNode } from '@0agent/core';
+import { NodeType, EdgeType, createNode } from '@0agent/core';
 
 export class MemoryCapability implements Capability {
   readonly name = 'memory_write';
@@ -26,7 +26,16 @@ export class MemoryCapability implements Capability {
     },
   };
 
-  constructor(private graph: KnowledgeGraph, private onWrite?: () => void) {}
+  constructor(
+    private graph: KnowledgeGraph,
+    private onWrite?: () => void,
+    private entityNodeId?: string,
+  ) {}
+
+  /** Update the entity node ID (set per-session by the executor). */
+  setEntityNodeId(id: string): void {
+    this.entityNodeId = id;
+  }
 
   async execute(input: Record<string, unknown>, _cwd: string): Promise<CapabilityResult> {
     const label   = String(input.label   ?? '').trim();
@@ -57,6 +66,11 @@ export class MemoryCapability implements Capability {
           metadata: { content, type, saved_at: new Date().toISOString() },
         });
         this.graph.addNode(node);
+
+        // Create edge from user entity → memory node (so the graph shows connections)
+        if (this.entityNodeId) {
+          this._ensureEdge(this.entityNodeId, nodeId, EdgeType.PRODUCES);
+        }
       }
 
       const result = {
@@ -73,6 +87,30 @@ export class MemoryCapability implements Capability {
         output: `Memory write failed: ${err instanceof Error ? err.message : String(err)}`,
         duration_ms: Date.now() - start,
       };
+    }
+  }
+
+  /** Create an edge if it doesn't already exist. */
+  private _ensureEdge(fromId: string, toId: string, type: EdgeType): void {
+    try {
+      const edgeId = `edge:${fromId}→${toId}`;
+      if (this.graph.getEdge(edgeId)) return; // already exists
+      this.graph.addEdge({
+        id: edgeId,
+        graph_id: 'root',
+        from_node: fromId,
+        to_node: toId,
+        type,
+        weight: 0.8,
+        locked: false,
+        decay_rate: 0.001,
+        created_at: Date.now(),
+        last_traversed: null,
+        traversal_count: 0,
+        metadata: {},
+      });
+    } catch {
+      // Non-fatal — edge creation failure shouldn't block memory write
     }
   }
 }

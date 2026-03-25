@@ -46,6 +46,7 @@ import { CodespaceManager } from './CodespaceManager.js';
 import { SchedulerManager } from './SchedulerManager.js';
 import { RuntimeSelfHeal } from './RuntimeSelfHeal.js';
 import { TelegramBridge } from './TelegramBridge.js';
+import { SurfaceRouter, TelegramAdapter, SlackAdapter, WhatsAppAdapter, VoiceAdapter, MeetingAdapter } from './surfaces/index.js';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 import type { DaemonStatus } from './routes/health.js';
@@ -76,6 +77,7 @@ export class ZeroAgentDaemon {
   private schedulerManager: SchedulerManager | null = null;
   private runtimeHealer: RuntimeSelfHeal | null = null;
   private telegramBridge: TelegramBridge | null = null;
+  private surfaceRouter: SurfaceRouter | null = null;
   private startedAt: number = 0;
   private pidFilePath: string;
 
@@ -118,6 +120,15 @@ export class ZeroAgentDaemon {
           base_url: defaultLLM.base_url,
         })
       : undefined;
+
+    // Export ANTHROPIC_API_KEY so child processes (Open Interpreter) can authenticate.
+    // Only sets if not already in environment — respects explicit env overrides.
+    if (!process.env['ANTHROPIC_API_KEY']) {
+      const anthropicProvider = this.config.llm_providers.find(p => p.provider === 'anthropic' && p.api_key);
+      if (anthropicProvider?.api_key) {
+        process.env['ANTHROPIC_API_KEY'] = anthropicProvider.api_key;
+      }
+    }
 
     if (llmExecutor?.isConfigured) {
       console.log(`[0agent] LLM: ${defaultLLM?.provider}/${defaultLLM?.model}`);
@@ -278,11 +289,57 @@ export class ZeroAgentDaemon {
     this.schedulerManager = new SchedulerManager(this.adapter, this.sessionManager, this.eventBus);
     this.schedulerManager.start();
 
-    // 6.9 — Telegram bridge: forward bot messages to 0agent sessions
-    const tgCfg = (this.config as Record<string, unknown>)['telegram'];
-    if (TelegramBridge.isConfigured(tgCfg) && this.sessionManager && this.eventBus) {
-      this.telegramBridge = new TelegramBridge(tgCfg, this.sessionManager, this.eventBus);
-      this.telegramBridge.start();
+    // 6.9 — Surface router: wire all messaging surface adapters
+    if (this.sessionManager && this.eventBus && this.graph) {
+      this.surfaceRouter = new SurfaceRouter(this.sessionManager, this.eventBus, this.graph);
+      const surfacesCfg = (this.config as Record<string, unknown>)['surfaces'] as Record<string, unknown> | undefined;
+      const legacyTgCfg = (this.config as Record<string, unknown>)['telegram'];
+
+      // Telegram: prefer surfaces.telegram, fall back to legacy top-level telegram key
+      const tgCfg = (surfacesCfg?.['telegram'] as Record<string, unknown> | undefined) ?? legacyTgCfg;
+      if (TelegramAdapter.isConfigured(tgCfg)) {
+        this.surfaceRouter.register(new TelegramAdapter(tgCfg));
+        console.log('[0agent] Surface: Telegram');
+      } else if (TelegramBridge.isConfigured(tgCfg)) {
+        // Legacy bridge (single-user self-hosted) — keep working
+        this.telegramBridge = new TelegramBridge(tgCfg, this.sessionManager, this.eventBus);
+        this.telegramBridge.start();
+        console.log('[0agent] Surface: Telegram (legacy bridge)');
+      }
+
+      // Slack
+      const slackCfg = surfacesCfg?.['slack'] as Record<string, unknown> | undefined;
+      if (SlackAdapter.isConfigured(slackCfg)) {
+        this.surfaceRouter.register(new SlackAdapter(slackCfg as import('./surfaces/SlackAdapter.js').SlackAdapterConfig));
+        console.log('[0agent] Surface: Slack');
+      }
+
+      // WhatsApp
+      const waCfg = surfacesCfg?.['whatsapp'] as Record<string, unknown> | undefined;
+      if (WhatsAppAdapter.isConfigured(waCfg)) {
+        const waAdapter = new WhatsAppAdapter(waCfg as import('./surfaces/WhatsAppAdapter.js').WhatsAppAdapterConfig);
+        this.surfaceRouter.register(waAdapter);
+        console.log('[0agent] Surface: WhatsApp');
+      }
+
+      // Voice (opt-in via config)
+      const voiceCfg = surfacesCfg?.['voice'] as Record<string, unknown> | undefined;
+      if (voiceCfg?.['enabled'] === true) {
+        this.surfaceRouter.register(new VoiceAdapter(voiceCfg as import('./surfaces/VoiceAdapter.js').VoiceAdapterConfig));
+        console.log('[0agent] Surface: Voice');
+      }
+
+      // Meeting transcription (opt-in via config)
+      const meetingCfg = surfacesCfg?.['meeting'] as Record<string, unknown> | undefined;
+      if (meetingCfg?.['enabled'] === true) {
+        this.surfaceRouter.register(new MeetingAdapter(meetingCfg as import('./surfaces/MeetingAdapter.js').MeetingAdapterConfig));
+        console.log('[0agent] Surface: Meeting transcription');
+      }
+
+      // Start all registered adapters
+      if (this.surfaceRouter.registeredSurfaces().length > 0) {
+        await this.surfaceRouter.start();
+      }
     }
 
     // 7. Create BackgroundWorkers, start them
@@ -303,6 +360,9 @@ export class ZeroAgentDaemon {
     // 8. Create HTTPServer, start it
     this.startedAt = Date.now();
     const memSyncRef = this.githubMemorySync;
+    // Grab the WhatsApp adapter from the router (if registered) for HTTP webhook mounting
+    const waAdapter = this.surfaceRouter?.getAdapter('whatsapp') as import('./surfaces/WhatsAppAdapter.js').WhatsAppAdapter | undefined;
+
     this.httpServer = new HTTPServer({
       port: this.config.server.port,
       host: this.config.server.host,
@@ -316,6 +376,7 @@ export class ZeroAgentDaemon {
       getCodespaceManager: () => this.codespaceManager,
       scheduler: this.schedulerManager,
       healer: this.runtimeHealer,
+      whatsAppAdapter: waAdapter ?? null,
       setupCodespace: async () => {
         if (!this.codespaceManager) return { started: false, error: 'GitHub memory not configured. Run: 0agent memory connect github' };
         try {
@@ -372,6 +433,8 @@ export class ZeroAgentDaemon {
     this.githubMemorySync = null;
     this.telegramBridge?.stop();
     this.telegramBridge = null;
+    await this.surfaceRouter?.stop().catch(() => {});
+    this.surfaceRouter = null;
     this.schedulerManager?.stop();
     this.schedulerManager = null;
     this.codespaceManager?.closeTunnel();

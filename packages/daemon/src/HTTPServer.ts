@@ -44,6 +44,7 @@ import type { SessionManager } from './SessionManager.js';
 import type { SkillRegistry } from './SkillRegistry.js';
 import type { GitHubMemorySync } from './GitHubMemorySync.js';
 import type { ProactiveSurface } from './ProactiveSurface.js';
+import type { WhatsAppAdapter } from './surfaces/WhatsAppAdapter.js';
 
 export interface HTTPServerDeps {
   port: number;
@@ -59,6 +60,8 @@ export interface HTTPServerDeps {
   setupCodespace?: () => Promise<{ started: boolean; error?: string }>;
   scheduler?: SchedulerManager | null;
   healer?: RuntimeSelfHeal | null;
+  /** WhatsApp adapter — mounts inbound webhook routes if provided */
+  whatsAppAdapter?: WhatsAppAdapter | null;
 }
 
 export class HTTPServer {
@@ -87,6 +90,11 @@ export class HTTPServer {
       getManager: deps.getCodespaceManager ?? (() => null),
       setup: deps.setupCodespace ?? (async () => ({ started: false, error: 'Not configured' })),
     }));
+
+    // Mount WhatsApp inbound webhook if configured
+    if (deps.whatsAppAdapter) {
+      this.app.route('/webhooks', deps.whatsAppAdapter.webhookRoutes());
+    }
 
     // Serve 3D knowledge graph at root and /graph
     const serveGraph = (c: any) => {

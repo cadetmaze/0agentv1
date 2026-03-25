@@ -1,0 +1,10 @@
+export type { SurfaceAdapter, SurfaceType, FormatType, InboundMessage, OutboundMessage, Attachment } from './SurfaceAdapter.js';
+export { SurfaceRouter } from './SurfaceRouter.js';
+export { UserEntityMapper } from './UserEntityMapper.js';
+export { TelegramAdapter, type TelegramAdapterConfig } from './TelegramAdapter.js';
+export { SlackAdapter, type SlackAdapterConfig } from './SlackAdapter.js';
+export { WhatsAppAdapter, type WhatsAppAdapterConfig, type WhatsAppProvider } from './WhatsAppAdapter.js';
+export { VoiceAdapter, type VoiceAdapterConfig, type VoiceMode } from './VoiceAdapter.js';
+export { MeetingAdapter, type MeetingAdapterConfig } from './MeetingAdapter.js';
+export { WhisperSTT, recordAudio, recordSystemAudio } from './WhisperSTT.js';
+export { NativeTTS } from './NativeTTS.js';

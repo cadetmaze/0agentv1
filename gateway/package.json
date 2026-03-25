@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0",
-    "dockerode": "^4.0.2"
+    "dockerode": "^4.0.2",
+    "ws": "^8.18.0"
   },
   "engines": {
     "node": ">=20.0.0"

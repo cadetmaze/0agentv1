@@ -248,8 +248,10 @@ export class KnowledgeGraph {
           source: 'structural',
         });
       }
-    } else if (opts.graph_id || opts.node_type) {
-      // Query nodes directly by graph_id and/or type
+    } else {
+      // No directional filter — query nodes directly by graph_id and/or type.
+      // When neither is set this returns ALL nodes (full-graph scan), which is
+      // what the 3D visualiser needs when it calls /api/graph/nodes with no params.
       const nodes = this.adapter.queryNodes({
         graph_id: opts.graph_id,
         type: opts.node_type,

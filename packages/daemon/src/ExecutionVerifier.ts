@@ -16,6 +16,7 @@ export interface AgentResult {
   files_written: string[];
   commands_run: string[];
   tokens_used: number;
+  cost_usd: number;
   model: string;
   iterations: number;
 }

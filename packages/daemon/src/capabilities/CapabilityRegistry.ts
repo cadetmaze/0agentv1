@@ -6,7 +6,7 @@ import { ScraperCapability } from './ScraperCapability.js';
 import { ShellCapability } from './ShellCapability.js';
 import { FileCapability } from './FileCapability.js';
 import { MemoryCapability } from './MemoryCapability.js';
-import { GUICapability } from './GUICapability.js';
+import { OpenInterpreterCapability } from './OpenInterpreterCapability.js';
 
 export class CapabilityRegistry {
   private capabilities = new Map<string, Capability>();
@@ -39,12 +39,21 @@ export class CapabilityRegistry {
     this.register(new ScraperCapability());
     this.register(new ShellCapability());
     this.register(new FileCapability());
-    this.register(new GUICapability());
+    this.register(new OpenInterpreterCapability());
 
     // Memory capability — only available when graph is connected
     if (graph) {
       this.register(new MemoryCapability(graph, onMemoryWrite));
     }
+  }
+
+  /**
+   * Set the entity node ID on the memory capability so edges connect to the right user.
+   * Called per-session before execution starts.
+   */
+  setEntityNodeId(id: string): void {
+    const mem = this.capabilities.get('memory_write') as MemoryCapability | undefined;
+    mem?.setEntityNodeId?.(id);
   }
 
   register(cap: Capability): void {
@@ -57,6 +66,33 @@ export class CapabilityRegistry {
 
   getToolDefinitions(): ToolDefinition[] {
     return [...this.capabilities.values()].map(c => c.toolDefinition);
+  }
+
+  /**
+   * Return tool definitions relevant to a given task (progressive disclosure).
+   * Core tools (shell, file, memory) are always included. Web/GUI tools only
+   * when the task implies they're needed — saves ~200 tokens per turn.
+   */
+  getToolDefinitionsFor(task: string): ToolDefinition[] {
+    const lower = task.toLowerCase();
+
+    const active = new Set(['shell_exec', 'file_op']);
+    if (this.capabilities.has('memory_write')) active.add('memory_write');
+
+    if (/search|web|browse|scrape|research|website|url|http|google|fetch|crawl|find.*online/i.test(lower)) {
+      active.add('web_search');
+      active.add('scrape_url');
+      active.add('browser_open');
+    }
+
+    // computer_use (Open Interpreter) for interactive GUI, browser, and keyboard/mouse tasks
+    if (/click|screenshot|ui|desktop|window|screen|gui|mouse|keyboard|open.*app|fill.*form|navigate.*browser|interact|automate|computer.*use/i.test(lower)) {
+      active.add('computer_use');
+    }
+
+    return [...this.capabilities.values()]
+      .filter(c => active.has(c.name))
+      .map(c => c.toolDefinition);
   }
 
   async execute(toolName: string, input: Record<string, unknown>, cwd: string, signal?: AbortSignal): Promise<CapabilityResult> {

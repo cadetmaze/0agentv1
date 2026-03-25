@@ -31,6 +31,9 @@ export interface LLMResponse {
   tool_calls: ToolCall[] | null;
   stop_reason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop';
   tokens_used: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
   model: string;
 }
 
@@ -122,6 +125,36 @@ export class LLMExecutor {
   get isConfigured(): boolean {
     if (this.config.provider === 'ollama') return true;
     return !!(this.config.api_key?.trim());
+  }
+
+  /** Context window size in tokens for a given model. */
+  static getContextWindowTokens(model: string): number {
+    const m = model.toLowerCase();
+    if (m.includes('claude'))    return 200_000;
+    if (m.includes('gpt-4o'))    return 128_000;
+    if (m.includes('gpt-4-turbo')) return 128_000;
+    if (m.includes('grok'))      return 131_072;
+    if (m.includes('gemini'))    return 1_000_000;
+    return 128_000; // safe default
+  }
+
+  /** Approximate pricing in USD per million tokens. */
+  static getModelPricing(model: string): { input: number; output: number } {
+    const m = model.toLowerCase();
+    if (m.includes('opus'))       return { input: 15, output: 75 };
+    if (m.includes('sonnet'))     return { input: 3, output: 15 };
+    if (m.includes('haiku'))      return { input: 0.8, output: 4 };
+    if (m.includes('gpt-4o-mini'))return { input: 0.15, output: 0.6 };
+    if (m.includes('gpt-4o'))     return { input: 2.5, output: 10 };
+    if (m.includes('grok'))       return { input: 2, output: 10 };
+    if (m.includes('gemini'))     return { input: 1.25, output: 5 };
+    if (m.includes('ollama') || m.includes('llama')) return { input: 0, output: 0 };
+    return { input: 3, output: 15 };
+  }
+
+  static computeCost(model: string, inputTokens: number, outputTokens: number): number {
+    const p = LLMExecutor.getModelPricing(model);
+    return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
   }
 
   // ─── Single completion (no tools, no streaming) ──────────────────────────
@@ -298,6 +331,9 @@ export class LLMExecutor {
       tool_calls: toolCalls.length > 0 ? toolCalls : null,
       stop_reason: stopReason,
       tokens_used: inputTokens + outputTokens,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cost_usd: LLMExecutor.computeCost(modelName, inputTokens, outputTokens),
       model: modelName,
     };
   }
@@ -368,6 +404,8 @@ export class LLMExecutor {
 
     let textContent = '';
     let tokensUsed = 0;
+    let oaiInputTokens = 0;
+    let oaiOutputTokens = 0;
     let modelName = this.config.model;
     let stopReason: LLMResponse['stop_reason'] = 'end_turn';
     const toolCallMap: Record<number, { id: string; name: string; args: string }> = {};
@@ -394,6 +432,8 @@ export class LLMExecutor {
         modelName = (evt.model as string) ?? modelName;
         const usage = evt.usage as Record<string, unknown> | undefined;
         if (usage?.total_tokens) tokensUsed = usage.total_tokens as number;
+        if (usage?.prompt_tokens) oaiInputTokens = usage.prompt_tokens as number;
+        if (usage?.completion_tokens) oaiOutputTokens = usage.completion_tokens as number;
 
         const choices = evt.choices as Array<Record<string, unknown>> | undefined;
         if (!choices?.length) continue;
@@ -436,6 +476,9 @@ export class LLMExecutor {
       tool_calls: toolCalls.length > 0 ? toolCalls : null,
       stop_reason: stopReason,
       tokens_used: tokensUsed,
+      input_tokens: oaiInputTokens,
+      output_tokens: oaiOutputTokens,
+      cost_usd: LLMExecutor.computeCost(modelName, oaiInputTokens, oaiOutputTokens),
       model: modelName,
     };
   }
@@ -458,6 +501,7 @@ export class LLMExecutor {
     if (!res.ok) throw new Error(`Ollama error ${res.status}`);
     const data = await res.json() as { message: { content: string }; eval_count?: number };
     if (onToken) onToken(data.message.content);
-    return { content: data.message.content, tool_calls: null, stop_reason: 'end_turn', tokens_used: data.eval_count ?? 0, model: this.config.model };
+    const ollamaTokens = data.eval_count ?? 0;
+    return { content: data.message.content, tool_calls: null, stop_reason: 'end_turn', tokens_used: ollamaTokens, input_tokens: 0, output_tokens: ollamaTokens, cost_usd: 0, model: this.config.model };
   }
 }

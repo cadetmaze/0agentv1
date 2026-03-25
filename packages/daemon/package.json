@@ -20,6 +20,9 @@
     "yaml": "^2.6.0",
     "zod": "^3.23.0"
   },
+  "optionalDependencies": {
+    "@slack/bolt": "^4.0.0"
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^25.5.0",

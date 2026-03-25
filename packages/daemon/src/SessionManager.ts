@@ -12,7 +12,7 @@ import type {
   IInferenceEngine,
   SQLiteAdapter,
 } from '@0agent/core';
-import { WeightEventLog, EdgeWeightUpdater, NodeType, createNode } from '@0agent/core';
+import { WeightEventLog, EdgeWeightUpdater, NodeType, EdgeType, createNode } from '@0agent/core';
 
 import type { IEventBus } from './WebSocketEvents.js';
 import { EntityScopedContextLoader } from './EntityScopedContext.js';
@@ -354,9 +354,10 @@ export class SessionManager {
       // Step 5: execute via AgentExecutor (real tool calling + streaming)
       const activeLLM = this.getFreshLLM();  // always latest key from config
       if (activeLLM?.isConfigured) {
+        const userEntityId = enrichedReq.entity_id ?? this.identity?.entity_node_id;
         const executor = new AgentExecutor(
           activeLLM,
-          { cwd: this.cwd, agent_root: this.agentRoot, graph: this.graph, onMemoryWrite: this.onMemoryWritten },
+          { cwd: this.cwd, agent_root: this.agentRoot, graph: this.graph, onMemoryWrite: this.onMemoryWritten, entityNodeId: userEntityId },
           // step callback → emit session.step events
           (step) => this.addStep(sessionId, step),
           // token callback → emit session.token events
@@ -372,7 +373,6 @@ export class SessionManager {
           : undefined;
 
         // Conversation history — the key to "make it dark mode" understanding "it"
-        const userEntityId = enrichedReq.entity_id ?? this.identity?.entity_node_id;
         let conversationHistory: string | undefined;
         if (this.conversationStore && userEntityId) {
           const history = this.conversationStore.buildContextMessages(userEntityId, 8);
@@ -402,6 +402,7 @@ export class SessionManager {
           agent_root: this.agentRoot,
           graph: this.graph,
           onMemoryWrite: this.onMemoryWritten,
+          entityNodeId: userEntityId,
         };
         let agentResult: Awaited<ReturnType<typeof executor.execute>>;
         try {
@@ -490,6 +491,10 @@ export class SessionManager {
               this.graph.addNode(createNode({
                 id: nodeId, graph_id: 'root', label, type: NodeType.CONTEXT, metadata: meta,
               }));
+              // Connect session summary → user entity
+              if (userEntityId) {
+                this._ensureEdge(userEntityId, nodeId);
+              }
             }
             console.log(`[0agent] Graph: wrote session summary node (${nodeId})`);
             this.onMemoryWritten?.();
@@ -499,7 +504,7 @@ export class SessionManager {
         }
 
         // Extract and persist factual entities from this conversation to long-term memory
-        this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM).catch((err) => {
+        this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM, userEntityId).catch((err) => {
           console.warn('[0agent] Memory extraction outer error:', err instanceof Error ? err.message : err);
         });
 
@@ -585,7 +590,7 @@ export class SessionManager {
    * (name, projects, tech, preferences, URLs) and persist them to the graph.
    * This catches everything the agent didn't explicitly memory_write during execution.
    */
-  private async _extractAndPersistFacts(task: string, output: string, _llm: LLMExecutor): Promise<void> {
+  private async _extractAndPersistFacts(task: string, output: string, _llm: LLMExecutor, entityId?: string): Promise<void> {
     if (!this.graph) return;
 
     // Use haiku for extraction — fast + cheap for background summarisation.
@@ -683,6 +688,10 @@ Agent: ${output.slice(0, 500)}`;
               type: NodeType.CONTEXT,
               metadata: { content: e.content, type: e.type ?? 'note', saved_at: new Date().toISOString() },
             }));
+            // Connect extracted fact → user entity
+            if (entityId) {
+              this._ensureEdge(entityId, nodeId);
+            }
           }
           wrote++;
         } catch (err) {
@@ -719,6 +728,31 @@ Agent: ${output.slice(0, 500)}`;
 
     if (success) return healed ? 0.1 : 0.3;  // retry = partial credit
     return -0.2;                               // all attempts failed
+  }
+
+  /** Create an edge between two nodes if it doesn't already exist. */
+  private _ensureEdge(fromId: string, toId: string): void {
+    if (!this.graph) return;
+    try {
+      const edgeId = `edge:${fromId}→${toId}`;
+      if (this.graph.getEdge(edgeId)) return;
+      this.graph.addEdge({
+        id: edgeId,
+        graph_id: 'root',
+        from_node: fromId,
+        to_node: toId,
+        type: EdgeType.PRODUCES,
+        weight: 0.8,
+        locked: false,
+        decay_rate: 0.001,
+        created_at: Date.now(),
+        last_traversed: null,
+        traversal_count: 0,
+        metadata: {},
+      });
+    } catch {
+      // Non-fatal
+    }
   }
 }
 

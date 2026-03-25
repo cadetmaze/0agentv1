@@ -102,6 +102,61 @@ export const EntityNestingConfigSchema = z.object({
   visibility_policy: EntityVisibilityPolicySchema.default({}),
 });
 
+// ─── Surfaces Config ─────────────────────────────────────────────────────────
+
+export const TelegramSurfaceSchema = z.object({
+  token: z.string().default(''),
+  allowed_users: z.array(z.number()).default([]),
+  transcribe_voice: z.boolean().default(true),
+  whisper_model: z.enum(['tiny', 'base', 'small', 'medium', 'large']).default('base'),
+  daemon_url: z.string().default('http://localhost:4200'),
+});
+
+export const SlackSurfaceSchema = z.object({
+  bot_token: z.string().default(''),
+  app_token: z.string().default(''),
+  signing_secret: z.string().default(''),
+});
+
+export const WhatsAppSurfaceSchema = z.object({
+  provider: z.enum(['twilio', 'meta']).default('twilio'),
+  // Twilio
+  account_sid: z.string().optional(),
+  auth_token: z.string().optional(),
+  from_number: z.string().optional(),
+  // Meta
+  phone_number_id: z.string().optional(),
+  access_token: z.string().optional(),
+  verify_token: z.string().optional(),
+});
+
+export const VoiceSurfaceSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(['push_to_talk', 'always_on']).default('push_to_talk'),
+  whisper_model: z.enum(['tiny', 'base', 'small', 'medium', 'large']).default('base'),
+  whisper_language: z.string().optional(),
+  tts_engine: z.enum(['say', 'piper', 'espeak', 'edge-tts', 'auto']).default('auto'),
+  tts_voice: z.string().optional(),
+  chunk_seconds: z.number().default(5),
+});
+
+export const MeetingSurfaceSchema = z.object({
+  enabled: z.boolean().default(false),
+  whisper_model: z.enum(['tiny', 'base', 'small', 'medium', 'large']).default('base'),
+  chunk_seconds: z.number().default(30),
+  silence_timeout_seconds: z.number().default(60),
+  trigger_phrases: z.array(z.string()).default(['agent,', 'hey agent', 'ok agent']),
+  context_window_seconds: z.number().default(120),
+});
+
+export const SurfacesConfigSchema = z.object({
+  telegram: TelegramSurfaceSchema.optional(),
+  slack: SlackSurfaceSchema.optional(),
+  whatsapp: WhatsAppSurfaceSchema.optional(),
+  voice: VoiceSurfaceSchema.optional(),
+  meeting: MeetingSurfaceSchema.optional(),
+});
+
 export const DaemonConfigSchema = z.object({
   version: z.string().default("1"),
   llm_providers: z.array(LLMProviderSchema).min(1),
@@ -121,6 +176,7 @@ export const DaemonConfigSchema = z.object({
     owner:   z.string().default(''),
     repo:    z.string().default('0agent-memory'),
   }).default({}),
+  surfaces: SurfacesConfigSchema.default({}),
 });
 
 export type DaemonConfig = z.infer<typeof DaemonConfigSchema>;
