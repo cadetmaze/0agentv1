@@ -23,7 +23,7 @@
  */
 
 import type { Capability, CapabilityResult, ToolDefinition } from './types.js';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -140,21 +140,15 @@ export class OpenInterpreterCapability implements Capability {
       return { success: false, output: 'Cancelled.', duration_ms: Date.now() - start };
     }
 
-    // Auto-install open-interpreter on first use
+    // Auto-install open-interpreter on first use (async — must not block the event loop)
     if (result.stdout.includes('__MISSING_MODULE__') || result.code === 127) {
-      const install = spawnSync(
-        'pip3',
-        ['install', 'open-interpreter', '-q', '--upgrade'],
-        { timeout: 120_000, encoding: 'utf8' },
-      );
-
-      if (install.status !== 0) {
+      const installOk = await this._pipInstall('open-interpreter', signal);
+      if (!installOk) {
         return {
           success: false,
           output:
             `open-interpreter is not installed and auto-install failed.\n` +
-            `Run manually: pip3 install open-interpreter\n` +
-            `Error: ${(install.stderr ?? '').slice(0, 300)}`,
+            `Run manually: pip3 install open-interpreter`,
           duration_ms: Date.now() - start,
         };
       }
@@ -180,6 +174,29 @@ export class OpenInterpreterCapability implements Capability {
       output: `computer_use error: ${errMsg.slice(0, 500)}`,
       duration_ms: Date.now() - start,
     };
+  }
+
+  /** Async pip install — never blocks the event loop (unlike spawnSync). */
+  private _pipInstall(pkg: string, signal?: AbortSignal): Promise<boolean> {
+    return new Promise((resolve) => {
+      const proc = spawn('pip3', ['install', pkg, '-q'], {
+        env: process.env,
+        stdio: 'ignore',
+      });
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const onAbort = () => { try { proc.kill('SIGKILL'); } catch {} finish(false); };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      proc.on('exit', (code) => finish(code === 0));
+      proc.on('error', () => finish(false));
+      const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} finish(false); }, 180_000);
+    });
   }
 
   private _runScript(
