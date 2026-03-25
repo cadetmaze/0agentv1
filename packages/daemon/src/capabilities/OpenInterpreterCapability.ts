@@ -121,11 +121,21 @@ export class OpenInterpreterCapability implements Capability {
 
   async execute(input: Record<string, unknown>, _cwd: string, signal?: AbortSignal): Promise<CapabilityResult> {
     const start = Date.now();
-    const task = String(input.task ?? '').trim();
+    // Accept both {task: "..."} (preferred) and legacy {action: "...", ...} format
+    let task = String(input.task ?? '').trim();
+    if (!task && input.action) {
+      // Convert legacy gui_automation-style input into a natural language task
+      const action = String(input.action);
+      const parts: string[] = [`Action: ${action}`];
+      for (const [k, v] of Object.entries(input)) {
+        if (k !== 'action') parts.push(`${k}: ${v}`);
+      }
+      task = parts.join(', ');
+    }
     const context = input.context ? String(input.context).trim() : '';
 
     if (!task) {
-      return { success: false, output: 'task is required', duration_ms: 0 };
+      return { success: false, output: 'task is required — provide either {task: "description"} or {action: "..."}', duration_ms: 0 };
     }
 
     const fullTask = context ? `Context: ${context}\n\nTask: ${task}` : task;

@@ -154,6 +154,22 @@ export class GUICapability implements Capability {
         return { success: false, output: result.stderr.trim() || 'Unknown error after install', duration_ms: Date.now() - start };
       }
 
+      // macOS Screen Recording permission error (screenshot/find_and_click)
+      if (err.includes('could not create image from display') || err.includes('screencapture') || err.includes('CGDisplayStream')) {
+        if (platform() === 'darwin') {
+          spawnSync('open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { timeout: 3000 });
+        }
+        return {
+          success: false,
+          output:
+            'macOS Screen Recording permission required for screenshots.\n' +
+            '→ System Settings has been opened automatically.\n' +
+            '→ Go to: Privacy & Security → Screen Recording → enable Terminal (or iTerm2)\n' +
+            '→ Then re-run your task.',
+          duration_ms: Date.now() - start,
+        };
+      }
+
       // macOS accessibility permission error — auto-open System Settings
       if (err.includes('accessibility') || err.includes('permission') || err.includes('AXIsProcessTrusted')) {
         if (platform() === 'darwin') {
@@ -296,11 +312,9 @@ print(f"Moved to ({${x}}, {${y}})")
 
       case 'type': {
         if (!text) return null;
-        // Escape special chars for Python string
-        const escaped = text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
         return header + `
 pyautogui.write(${JSON.stringify(text)}, interval=${interval})
-print(f"Typed: ${JSON.stringify(text.slice(0, 40))}...")
+print("Typed successfully")
 `;
       }
 
