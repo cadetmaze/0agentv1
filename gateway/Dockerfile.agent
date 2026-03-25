@@ -1,0 +1,22 @@
+# 0agent sandbox container — one per Telegram user.
+# Runs the 0agent daemon, pre-configured via CONFIG_YAML env var.
+
+FROM node:20-slim
+
+# System deps: Python for GUI/automation tools, curl for health checks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv \
+      curl ca-certificates \
+      chromium chromium-driver \
+      xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install 0agent globally (picks up latest published version)
+RUN npm install -g 0agent@latest
+
+# Entrypoint: write config from env, then start daemon
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 4200
+ENTRYPOINT ["/entrypoint.sh"]
