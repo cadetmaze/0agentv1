@@ -60,7 +60,7 @@ export class GUICapability implements Capability {
           type: 'string',
           description:
             'Browser (no Screen Recording): "click_text"|"type_in"|"get_elements"|"read_element"|"get_media_state"|"scroll_to"|"exec_js"|"browser_state"|"cdp_screenshot" | ' +
-            'Native apps: "accessibility_click" | ' +
+            'Native apps (no Screen Recording): "app_type"|"accessibility_click" | ' +
             'Navigation: "open_url"|"open_app" | ' +
             'Mouse/KB (Screen Recording for screenshots): "screenshot"|"click"|"double_click"|"right_click"|"move"|"type"|"hotkey"|"scroll"|"drag"|"find_and_click"|"get_screen_size"|"get_cursor_pos"|"wait"',
         },
@@ -369,8 +369,9 @@ print(f"Moved to ({${x}}, {${y}})")
 
       case 'type': {
         if (!text) return null;
+        // typewrite is the backward-compatible name (write() was added later)
         return header + `
-pyautogui.write(${JSON.stringify(text)}, interval=${interval})
+pyautogui.typewrite(${JSON.stringify(text)}, interval=${interval})
 print("Typed successfully")
 `;
       }
@@ -686,6 +687,54 @@ time.sleep(1.5)
       }
 
       // ── New high-level browser actions — no Screen Recording needed ───────────
+
+      case 'app_type': {
+        // Type text into a specific macOS app via clipboard paste.
+        // HOW: copies text to clipboard (pbcopy), activates app, pastes with cmd+v via AppleScript.
+        // WHY THIS WORKS: cmd+v goes to the target process regardless of OS keyboard focus.
+        // Works for WhatsApp, iMessage, Notes, Finder — any native app.
+        // No Screen Recording needed. Requires Accessibility permission.
+        const appName = String(input.app ?? '').trim();
+        const typeText = String(input.text ?? text ?? '').trim();
+        if (!appName || !typeText) return null;
+        const osName = platform();
+        if (osName !== 'darwin') return header + `print("app_type requires macOS")`;
+        const safeApp = appName.replace(/'/g, "\\'");
+        const textJson = JSON.stringify(typeText);
+        return header + `
+import subprocess, time, json
+
+text_to_type = json.loads(${textJson})
+
+# Step 1: copy to clipboard (handles unicode, special chars, long text)
+cp = subprocess.run(['pbcopy'], input=text_to_type.encode('utf-8'), capture_output=True)
+if cp.returncode != 0:
+    print(f"Clipboard copy failed: {cp.stderr.decode()[:100]}")
+    sys.exit(1)
+
+# Step 2: bring app to front
+subprocess.run(['osascript', '-e', 'tell application "${safeApp}" to activate'], capture_output=True)
+time.sleep(0.4)
+
+# Step 3: paste via AppleScript System Events (targets the specific process, not OS focus)
+paste_script = """tell application "System Events"
+  tell process "${safeApp}"
+    keystroke "v" using command down
+  end tell
+end tell"""
+r = subprocess.run(['osascript', '-e', paste_script], capture_output=True, text=True)
+if r.returncode == 0:
+    print(f"Typed in ${safeApp}: {text_to_type[:60]}")
+else:
+    # Accessibility permission might be needed
+    err = r.stderr.strip()
+    if 'not allowed' in err.lower() or 'accessibility' in err.lower():
+        subprocess.run(['open', 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility'], capture_output=True)
+        print(f"Accessibility permission needed for ${safeApp}. System Settings opened — Privacy & Security → Accessibility → enable Terminal.")
+    else:
+        print(f"app_type error: {err[:200]}")
+`;
+      }
 
       case 'click_text': {
         // Click a visible element by its text content — no coordinates, no OCR, no Screen Recording.
