@@ -158,18 +158,62 @@ export class GUICapability implements Capability {
         return { success: false, output: result.stderr.trim() || 'Unknown error after install', duration_ms: Date.now() - start };
       }
 
-      // macOS Screen Recording permission error (screenshot/find_and_click)
-      if (err.includes('could not create image from display') || err.includes('screencapture') || err.includes('CGDisplayStream')) {
+      // macOS Screen Recording permission denied — try browser state as fallback
+      const isScreenRecordingDenied =
+        err.includes('could not create image from display') ||
+        err.includes('screen capture failed') ||
+        err.includes('screencapture') ||
+        err.includes('CGDisplayStream') ||
+        err.includes('Operation not permitted') ||
+        (err.includes('OSError') && err.includes('display')) ||
+        result.stdout.includes('could not create image from display');
+
+      if (isScreenRecordingDenied) {
         if (platform() === 'darwin') {
+          // Auto-open System Settings to fix the permission
           spawnSync('open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { timeout: 3000 });
+
+          // Fallback: get browser state via AppleScript (no Screen Recording needed)
+          const fallbackScript = `
+import subprocess
+as_script = '''tell application "Google Chrome"
+  tell front window
+    tell active tab
+      set tabURL to URL
+      set tabTitle to title
+      set videoSt to execute javascript "try{let v=document.querySelector('video');v?(v.paused?'PAUSED':'PLAYING:'+v.currentTime.toFixed(1)+'s'):'no-video'}catch(e){'?'}"
+      return tabURL & "|||" & tabTitle & "|||" & videoSt
+    end tell
+  end tell
+end tell'''
+r = subprocess.run(['osascript', '-e', as_script], capture_output=True, text=True)
+out = r.stdout.strip()
+parts = out.split('|||') if '|||' in out else []
+if len(parts) >= 3:
+    print(f"[No screenshot — Screen Recording permission needed]")
+    print(f"Browser URL: {parts[0]}")
+    print(f"Page title:  {parts[1]}")
+    print(f"Video state: {parts[2]}")
+    print(f"To enable screenshots: System Settings → Privacy & Security → Screen Recording → enable Terminal")
+else:
+    print("[No screenshot — Screen Recording permission needed]")
+    print("To fix: System Settings → Privacy & Security → Screen Recording → enable Terminal (or iTerm2)")
+`;
+          const fallbackTmp = resolve(tmpdir(), `0agent_scfb_${Date.now()}.py`);
+          writeFileSync(fallbackTmp, fallbackScript, 'utf8');
+          const fbResult = await runPy(fallbackTmp);
+          try { unlinkSync(fallbackTmp); } catch {}
+          if (fbResult.code === 0 && fbResult.stdout.trim()) {
+            return { success: false, output: fbResult.stdout.trim(), duration_ms: Date.now() - start };
+          }
         }
         return {
           success: false,
           output:
             'macOS Screen Recording permission required for screenshots.\n' +
-            '→ System Settings has been opened automatically.\n' +
-            '→ Go to: Privacy & Security → Screen Recording → enable Terminal (or iTerm2)\n' +
-            '→ Then re-run your task.',
+            'System Settings opened → Privacy & Security → Screen Recording → enable Terminal/iTerm2.\n' +
+            'For browser content, use exec_js instead: {action:"exec_js",js:"document.title"} or ' +
+            '{action:"browser_state"} — these work without Screen Recording.',
           duration_ms: Date.now() - start,
         };
       }
