@@ -388,29 +388,46 @@ print("Typed successfully")
           .map(k => k.trim())
           .filter(Boolean);
         const pyKeys = JSON.stringify(parts);
-        // If target app specified, focus it via AppleScript first, then send key via AppleScript
-        // (not pyautogui — pyautogui sends to whatever OS window is currently focused, usually Terminal)
+        // If target app specified, send via AppleScript (guarantees delivery to that app, not Terminal)
         if (targetApp && platform() === 'darwin') {
           const safeApp = targetApp.replace(/'/g, "\\'");
-          // Map key names to AppleScript keystroke syntax
-          const asKey = parts[parts.length - 1] ?? '';
-          const modifiers = parts.slice(0, -1).map(k => {
+          const mainKey = parts[parts.length - 1] ?? '';
+          const modParts = parts.slice(0, -1);
+
+          // Special keys that MUST use `key code` — `keystroke "down"` types literal text "down"
+          const KEY_CODES: Record<string, number> = {
+            down: 125, up: 126, left: 123, right: 124,
+            enter: 36, return: 36, escape: 53, esc: 53,
+            tab: 48, delete: 51, backspace: 51, 'delete-forward': 117,
+            space: 49, home: 115, end: 119, pageup: 116, pagedown: 121,
+            f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100,
+            f9: 101, f10: 109, f11: 103, f12: 111,
+          };
+
+          const keyCode = KEY_CODES[mainKey];
+          const modifiers = modParts.map(k => {
             if (k === 'command') return 'command down';
             if (k === 'ctrl') return 'control down';
             if (k === 'shift') return 'shift down';
             if (k === 'option') return 'option down';
             return '';
           }).filter(Boolean).join(', ');
-          const asModStr = modifiers ? ` using {${modifiers}}` : '';
+          const usingClause = modifiers ? ` using {${modifiers}}` : '';
+
+          // Use key code for special keys, keystroke for regular characters
+          const keyStatement = keyCode !== undefined
+            ? `key code ${keyCode}${usingClause}`
+            : `keystroke "${mainKey}"${usingClause}`;
+
           return header + `
 import subprocess, time
-# Focus target app first
 subprocess.run(['osascript', '-e', 'tell application "${safeApp}" to activate'], capture_output=True)
 time.sleep(0.3)
-# Send keystroke via AppleScript (reliable — goes to the focused app, not Terminal)
-as_script = '''tell application "System Events"
-  keystroke "${asKey}"${asModStr}
-end tell'''
+as_script = """tell application "System Events"
+  tell process "${safeApp}"
+    ${keyStatement}
+  end tell
+end tell"""
 r = subprocess.run(['osascript', '-e', as_script], capture_output=True, text=True)
 if r.returncode == 0:
     print(f"Sent ${parts.join('+')} to ${safeApp}")
