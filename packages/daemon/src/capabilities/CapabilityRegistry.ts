@@ -85,9 +85,10 @@ export class CapabilityRegistry {
       active.add('browser_open');
     }
 
-    // computer_use (Open Interpreter) for interactive GUI, browser, and keyboard/mouse tasks
-    if (/click|screenshot|ui|desktop|window|screen|gui|mouse|keyboard|open.*app|fill.*form|navigate.*browser|interact|automate|computer.*use/i.test(lower)) {
+    // computer_use + gui_automation for interactive GUI, browser, and keyboard/mouse tasks
+    if (/click|screenshot|ui|desktop|window|screen|gui|mouse|keyboard|open.*app|fill.*form|navigate.*browser|interact|automate|computer.*use|whatsapp|telegram|youtube|music|play|send.*message/i.test(lower)) {
       active.add('computer_use');
+      active.add('gui_automation'); // exec_js, browser_state, open_url live here
     }
 
     return [...this.capabilities.values()]

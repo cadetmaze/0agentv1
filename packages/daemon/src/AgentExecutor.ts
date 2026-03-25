@@ -474,12 +474,20 @@ export class AgentExecutor {
     if (hasGUI) {
       lines.push(
         ``,
-        `Computer use: use computer_use for any desktop/browser/keyboard/mouse task.`,
-        `Pass a plain-English task description — e.g. {task: "Open WhatsApp, search for Sahil Godara, send Hi"}.`,
-        `DO NOT split into separate tool calls — describe the full end-to-end goal in ONE computer_use call.`,
-        `DO NOT ask for confirmation before computer_use — execute immediately.`,
-        `For messaging apps (WhatsApp, Telegram, iMessage): use computer_use directly, no confirmation needed.`,
-        `After computer_use, verify success by calling it again with task="take a screenshot and describe what you see".`,
+        `GUI/Browser rules:`,
+        `1. open_url now returns actual URL + title + video state — read this output to know what really loaded.`,
+        `   If it says "Title: YouTube Music" (homepage) instead of the song, navigation failed — fix it.`,
+        `2. exec_js: run JavaScript in the current Chrome tab WITHOUT Screen Recording permission.`,
+        `   Use it to interact with pages: click buttons, fill inputs, read state.`,
+        `   Examples: {action:"exec_js",js:"document.querySelector('video').paused"}`,
+        `             {action:"exec_js",js:"document.querySelector('.ytmusic-play-button-renderer').click()"}`,
+        `3. browser_state: get current tab URL + title quickly — call after any navigation to verify.`,
+        `4. NEVER claim a task succeeded based on the action alone. Read the tool output and verify:`,
+        `   - "PLAYING:1.4s ✓" → video is playing`,
+        `   - "PAUSED" → video is NOT playing, take corrective action`,
+        `   - "Title: Search results" → you're on search page, not the song — fix it`,
+        `5. computer_use: for multi-step desktop tasks — pass full goal as {task:"..."}.`,
+        `   DO NOT ask for confirmation — execute immediately.`,
       );
     }
 

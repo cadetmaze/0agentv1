@@ -22,6 +22,8 @@
  *   wait            — pause for N seconds to let UI / page load before next action
  *   open_url        — open a URL in the existing browser window (no new window), launch browser if needed
  *   open_app        — open an application by name (macOS/Linux)
+ *   exec_js         — run JavaScript in the current Chrome tab via AppleScript (no Screen Recording needed)
+ *   browser_state   — get current Chrome tab URL + title (no Screen Recording needed)
  */
 
 import type { Capability, CapabilityResult, ToolDefinition } from './types.js';
@@ -37,12 +39,12 @@ export class GUICapability implements Capability {
   readonly toolDefinition: ToolDefinition = {
     name: 'gui_automation',
     description:
-      'Desktop GUI automation — ONLY for tasks that explicitly require controlling the screen. ' +
-      'DO NOT use for coding, research, file edits, or tasks that do not need the desktop UI. ' +
-      'DO NOT use alongside browser_open for the same URL — pick one tool and finish the task in it. ' +
-      'wait: pause N seconds for UI/page to load — use after every navigation or click that triggers a page load. ' +
-      'screenshot: only when you cannot proceed without seeing the screen. Max 2 per task. ' +
-      'open_url: opens in existing browser tab, never duplicates windows.',
+      'Desktop GUI automation — click, type, hotkeys, open URLs/apps. ' +
+      'exec_js: run JavaScript in the current Chrome tab — use this to interact with web pages ' +
+      '(click buttons, fill inputs, check state) WITHOUT needing Screen Recording permission. ' +
+      'browser_state: get current Chrome tab URL + title — verify navigation without Screen Recording. ' +
+      'open_url: for video pages (YouTube/YTM) navigates current tab and returns actual playing state. ' +
+      'ALWAYS call browser_state or exec_js after open_url to verify the page loaded correctly.',
     input_schema: {
       type: 'object',
       properties: {
@@ -51,8 +53,10 @@ export class GUICapability implements Capability {
           description:
             '"screenshot" | "click" | "double_click" | "right_click" | "move" | ' +
             '"type" | "hotkey" | "scroll" | "drag" | "find_and_click" | ' +
-            '"get_screen_size" | "get_cursor_pos" | "wait" | "open_url" | "open_app"',
+            '"get_screen_size" | "get_cursor_pos" | "wait" | "open_url" | "open_app" | ' +
+            '"exec_js" | "browser_state"',
         },
+        js: { type: 'string', description: 'JavaScript to run in current Chrome tab (use with exec_js action). Returns the result. Example: "document.querySelector(\'video\').paused"' },
         x:         { type: 'number',  description: 'X coordinate (pixels from left)' },
         y:         { type: 'number',  description: 'Y coordinate (pixels from top)' },
         to_x:      { type: 'number',  description: 'End X for drag' },
@@ -77,7 +81,7 @@ export class GUICapability implements Capability {
 
     const script = this._buildScript(action, input);
     if (!script) {
-      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, wait, open_url, open_app`, duration_ms: 0 };
+      return { success: false, output: `Unknown GUI action: "${action}". Valid: screenshot, click, double_click, right_click, move, type, hotkey, scroll, drag, find_and_click, get_screen_size, get_cursor_pos, wait, open_url, open_app, exec_js, browser_state`, duration_ms: 0 };
     }
 
     if (signal?.aborted) {
@@ -433,47 +437,60 @@ import urllib.parse
 domain = urllib.parse.urlparse(url).netloc
 
 if chrome_running:
-    # For YouTube videos: always navigate to URL (reload restarts the video)
-    # For other pages: switch to existing tab if same domain
     if is_youtube_video:
-        nav_script = f"""
-tell application "Google Chrome"
-  set foundTab to false
-  repeat with w in every window
-    set tabIdx to 1
-    repeat with t in every tab of w
-      if URL of t contains "youtube.com/watch" then
-        set active tab index of w to tabIdx
-        set index of w to 1
-        set URL of t to "{url}"
-        set foundTab to true
-        exit repeat
-      end if
-      set tabIdx to tabIdx + 1
-    end repeat
-    if foundTab then exit repeat
-  end repeat
-  if not foundTab then
-    tell front window to make new tab with properties {{URL:"{url}"}}
-  end if
+        # Navigate the CURRENT active tab directly to avoid domain-matching a wrong/stale tab
+        nav_script = f"""tell application "Google Chrome"
+  tell front window
+    tell active tab
+      set URL to "{url}"
+    end tell
+  end tell
   activate
 end tell"""
         subprocess.run(['osascript', '-e', nav_script], capture_output=True)
-        time.sleep(2)
-        # Trigger play via JavaScript in case autoplay was blocked
-        play_script = """
-tell application "Google Chrome"
+        time.sleep(3)
+        # Unmute + play via JS (handles autoplay policy blocks)
+        play_script = """tell application "Google Chrome"
   tell front window
     tell active tab
-      execute javascript "try { let v = document.querySelector('video'); if(v) { v.muted = false; v.play(); } } catch(e) {}"
+      execute javascript "try{let v=document.querySelector('video');if(v){v.muted=false;v.volume=1.0;v.play();}}catch(e){}"
     end tell
   end tell
 end tell"""
         subprocess.run(['osascript', '-e', play_script], capture_output=True)
-        print(f"Playing YouTube video: {url}")
+        time.sleep(1)
+        # Verify: get URL, title, video state — all via AppleScript, no Screen Recording needed
+        verify_script = """tell application "Google Chrome"
+  tell front window
+    tell active tab
+      set tabURL to URL
+      set tabTitle to title
+      set videoSt to execute javascript "try{let v=document.querySelector('video');v?(v.paused?'PAUSED':'PLAYING:'+v.currentTime.toFixed(1)+'s'):'no-video'}catch(e){'err'}"
+      return tabURL & "|||" & tabTitle & "|||" & videoSt
+    end tell
+  end tell
+end tell"""
+        vr = subprocess.run(['osascript', '-e', verify_script], capture_output=True, text=True)
+        parts = vr.stdout.strip().split('|||')
+        if len(parts) >= 3:
+            print(f"URL: {parts[0]}")
+            print(f"Title: {parts[1]}")
+            st = parts[2].strip()
+            if 'PLAYING' in st:
+                print(f"Video: {st} ✓")
+            elif st == 'PAUSED':
+                # Send play() one more time
+                subprocess.run(['osascript', '-e', play_script], capture_output=True)
+                time.sleep(0.5)
+                print("Video: was PAUSED — sent play() again, should be playing now")
+            else:
+                print(f"Video state: {st} (page may still be loading)")
+        else:
+            print(f"Navigated to: {url}")
+            print(f"(Verification unavailable: {vr.stdout.strip() or vr.stderr.strip()[:100]})")
     else:
-        check_script = f"""
-tell application "Google Chrome"
+        # Non-video: switch to existing same-domain tab or open new tab
+        check_script = f"""tell application "Google Chrome"
   set foundTab to false
   repeat with w in every window
     set tabIdx to 1
@@ -498,10 +515,22 @@ tell application "Google Chrome"
   end if
 end tell"""
         r = subprocess.run(['osascript', '-e', check_script], capture_output=True, text=True)
-        if r.stdout.strip() == "switched":
-            print(f"Switched to existing Chrome tab: {url}")
+        switched = r.stdout.strip() == "switched"
+        # Verify actual URL and title loaded (catches wrong-domain tab issues)
+        state_script = """tell application "Google Chrome"
+  tell front window
+    tell active tab
+      return URL & "|||" & title
+    end tell
+  end tell
+end tell"""
+        sr = subprocess.run(['osascript', '-e', state_script], capture_output=True, text=True)
+        sp = sr.stdout.strip().split('|||')
+        if len(sp) >= 2:
+            print(f"{'Switched to' if switched else 'Opened'}: {sp[0]}")
+            print(f"Title: {sp[1]}")
         else:
-            print(f"Opened new Chrome tab: {url}")
+            print(f"{'Switched to existing' if switched else 'Opened new'} Chrome tab: {url}")
 elif firefox_running:
     script = f'tell application "Firefox" to open location "{url}"'
     subprocess.run(['osascript', '-e', script])
@@ -569,6 +598,74 @@ import subprocess
 subprocess.Popen(['${safeApp}'])
 print(f"Launched: ${safeApp}")
 time.sleep(1.5)
+`;
+      }
+
+      case 'exec_js': {
+        // Run arbitrary JavaScript in the current Chrome tab via AppleScript.
+        // Does NOT require Screen Recording permission — works for any web page.
+        const js = String(input.js ?? '').trim();
+        if (!js) return null;
+        const osName = platform();
+        if (osName !== 'darwin') {
+          return header + `print("exec_js requires macOS + Google Chrome")`;
+        }
+        // JSON-encode the JS so Python can safely decode it (handles all special chars)
+        const jsJson = JSON.stringify(js);
+        return header + `
+import subprocess, json, os, tempfile
+
+js = json.loads(${jsJson})
+tmpjs = os.path.join(tempfile.gettempdir(), f"0agent_execjs_{os.getpid()}.js")
+with open(tmpjs, 'w') as f:
+    f.write(js)
+
+as_script = f'''tell application "Google Chrome"
+  tell front window
+    tell active tab
+      set jsCode to do shell script "cat '{tmpjs}'"
+      return execute javascript jsCode
+    end tell
+  end tell
+end tell'''
+
+r = subprocess.run(['osascript', '-e', as_script], capture_output=True, text=True)
+try: os.remove(tmpjs)
+except: pass
+
+if r.returncode == 0:
+    print(r.stdout.strip() if r.stdout.strip() else "(no return value)")
+else:
+    print(f"JS error: {r.stderr.strip()[:300]}")
+`;
+      }
+
+      case 'browser_state': {
+        // Get current Chrome tab URL + title via AppleScript.
+        // No Screen Recording needed. Use after any browser action to verify state.
+        const osName = platform();
+        if (osName !== 'darwin') {
+          return header + `print("browser_state requires macOS + Google Chrome")`;
+        }
+        return header + `
+import subprocess
+
+as_script = '''tell application "Google Chrome"
+  tell front window
+    tell active tab
+      return URL & "|||" & title
+    end tell
+  end tell
+end tell'''
+
+r = subprocess.run(['osascript', '-e', as_script], capture_output=True, text=True)
+out = r.stdout.strip()
+if '|||' in out:
+    parts = out.split('|||', 1)
+    print(f"URL: {parts[0]}")
+    print(f"Title: {parts[1]}")
+else:
+    print(out or r.stderr.strip() or "Chrome not running or no active tab")
 `;
       }
 
