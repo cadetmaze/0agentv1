@@ -6,6 +6,7 @@ import { ScraperCapability } from './ScraperCapability.js';
 import { ShellCapability } from './ShellCapability.js';
 import { FileCapability } from './FileCapability.js';
 import { MemoryCapability } from './MemoryCapability.js';
+import { GUICapability } from './GUICapability.js';
 import { OpenInterpreterCapability } from './OpenInterpreterCapability.js';
 
 export class CapabilityRegistry {
@@ -39,7 +40,8 @@ export class CapabilityRegistry {
     this.register(new ScraperCapability());
     this.register(new ShellCapability());
     this.register(new FileCapability());
-    this.register(new OpenInterpreterCapability());
+    this.register(new GUICapability());           // gui_automation: exec_js, click_text, type_in, get_elements, open_url, hotkey, browser_state
+    this.register(new OpenInterpreterCapability()); // computer_use: autonomous multi-step tasks via Open Interpreter
 
     // Memory capability — only available when graph is connected
     if (graph) {

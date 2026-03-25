@@ -39,24 +39,33 @@ export class GUICapability implements Capability {
   readonly toolDefinition: ToolDefinition = {
     name: 'gui_automation',
     description:
-      'Desktop GUI automation — click, type, hotkeys, open URLs/apps. ' +
-      'exec_js: run JavaScript in the current Chrome tab — use this to interact with web pages ' +
-      '(click buttons, fill inputs, check state) WITHOUT needing Screen Recording permission. ' +
-      'browser_state: get current Chrome tab URL + title — verify navigation without Screen Recording. ' +
-      'open_url: for video pages (YouTube/YTM) navigates current tab and returns actual playing state. ' +
-      'ALWAYS call browser_state or exec_js after open_url to verify the page loaded correctly.',
+      'GUI automation + comprehensive browser control. ' +
+      'BROWSER (no Screen Recording needed): ' +
+      'click_text — click any element by its visible text; ' +
+      'type_in — fill a form field by placeholder/label; ' +
+      'get_elements — list all interactive elements on the page; ' +
+      'read_element — read text of an element by CSS selector; ' +
+      'get_media_state — check if video is playing/paused/current time; ' +
+      'scroll_to — scroll page or scroll to specific element; ' +
+      'exec_js — run arbitrary JavaScript in Chrome tab; ' +
+      'browser_state — get current URL + title; ' +
+      'cdp_screenshot — screenshot via CDP (needs --remote-debugging-port=9222) with OCR. ' +
+      'NATIVE APPS: accessibility_click — click button in macOS app (WhatsApp, Finder) via Accessibility API. ' +
+      'NAVIGATION: open_url — navigate Chrome tab, returns URL+title+video state. ' +
+      'MOUSE/KEYBOARD: click, type, hotkey (use app param to target Chrome vs Terminal), screenshot (needs Screen Recording).',
     input_schema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           description:
-            '"screenshot" | "click" | "double_click" | "right_click" | "move" | ' +
-            '"type" | "hotkey" | "scroll" | "drag" | "find_and_click" | ' +
-            '"get_screen_size" | "get_cursor_pos" | "wait" | "open_url" | "open_app" | ' +
-            '"exec_js" | "browser_state"',
+            'Browser (no Screen Recording): "click_text"|"type_in"|"get_elements"|"read_element"|"get_media_state"|"scroll_to"|"exec_js"|"browser_state"|"cdp_screenshot" | ' +
+            'Native apps: "accessibility_click" | ' +
+            'Navigation: "open_url"|"open_app" | ' +
+            'Mouse/KB (Screen Recording for screenshots): "screenshot"|"click"|"double_click"|"right_click"|"move"|"type"|"hotkey"|"scroll"|"drag"|"find_and_click"|"get_screen_size"|"get_cursor_pos"|"wait"',
         },
-        js: { type: 'string', description: 'JavaScript to run in current Chrome tab (use with exec_js action). Returns the result. Example: "document.querySelector(\'video\').paused"' },
+        js: { type: 'string', description: 'JavaScript to execute in Chrome tab (use with exec_js). Example: "document.querySelector(\'video\').paused"' },
+        selector: { type: 'string', description: 'CSS selector for read_element, type_in, scroll_to (e.g. "input[type=search]", ".title", "video")' },
         x:         { type: 'number',  description: 'X coordinate (pixels from left)' },
         y:         { type: 'number',  description: 'Y coordinate (pixels from top)' },
         to_x:      { type: 'number',  description: 'End X for drag' },
@@ -676,6 +685,268 @@ time.sleep(1.5)
 `;
       }
 
+      // ── New high-level browser actions — no Screen Recording needed ───────────
+
+      case 'click_text': {
+        // Click a visible element by its text content — no coordinates, no OCR, no Screen Recording.
+        // Works on buttons, links, list items, tabs — anything with visible text.
+        if (!text) return null;
+        if (platform() !== 'darwin') return header + `print("click_text requires macOS + Chrome")`;
+        return this._chromeJs(JSON.stringify(text), `
+(function(t) {
+  t = t.toLowerCase().trim();
+  // Pass 1: interactive elements (buttons, links, roles)
+  var candidates = Array.from(document.querySelectorAll(
+    'button,a,[role="button"],[role="link"],[role="menuitem"],[role="option"],[role="tab"],[tabindex="0"],label'
+  ));
+  var match = candidates.find(el => {
+    var txt = (el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().toLowerCase();
+    return txt === t || txt.startsWith(t) || (t.length > 3 && txt.includes(t));
+  });
+  // Pass 2: any visible leaf element with matching text
+  if (!match) {
+    match = Array.from(document.querySelectorAll('*')).find(el => {
+      if (!el.offsetParent && el !== document.body) return false;
+      if (el.children.length > 0) return false;
+      var txt = (el.textContent || '').trim().toLowerCase();
+      return txt === t || (t.length > 4 && txt.includes(t) && txt.length < t.length * 3);
+    });
+  }
+  if (!match) return 'NOT_FOUND: ' + t;
+  match.scrollIntoView({behavior:'instant', block:'center'});
+  match.focus();
+  ['mousedown','mouseup','click'].forEach(e =>
+    match.dispatchEvent(new MouseEvent(e, {bubbles:true, cancelable:true}))
+  );
+  return 'CLICKED: ' + (match.textContent || match.getAttribute('aria-label') || match.tagName).trim().slice(0,80);
+})(JSARG)
+`);
+      }
+
+      case 'type_in': {
+        // Type text into a form field located by placeholder, aria-label, or CSS selector.
+        // Dispatches React/Vue-compatible synthetic events so frameworks pick up the change.
+        if (!text) return null;
+        if (platform() !== 'darwin') return header + `print("type_in requires macOS + Chrome")`;
+        const query = String(input.selector ?? input.query ?? '').trim() || 'active';
+        const args = JSON.stringify([query, text]);
+        return this._chromeJs(args, `
+(function(query, value) {
+  var el = query === 'active' ? document.activeElement :
+    document.querySelector('input[placeholder*="'+query+'" i]') ||
+    document.querySelector('input[aria-label*="'+query+'" i]') ||
+    document.querySelector('textarea[placeholder*="'+query+'" i]') ||
+    document.querySelector('[role="textbox"][aria-label*="'+query+'" i]') ||
+    document.querySelector('[contenteditable="true"]') ||
+    document.querySelector('input[type="text"],input[type="search"],input:not([type])');
+  if (!el) return 'NOT_FOUND: ' + query;
+  el.focus();
+  if (el.getAttribute('contenteditable') !== null) {
+    el.textContent = '';
+    document.execCommand('insertText', false, value);
+  } else {
+    var proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
+    ['input','change'].forEach(t => el.dispatchEvent(new Event(t, {bubbles:true})));
+  }
+  return 'TYPED "'+value.slice(0,40)+'" in '+(el.placeholder||el.getAttribute('aria-label')||el.tagName);
+})(JSARG[0], JSARG[1])
+`);
+      }
+
+      case 'read_element': {
+        // Read visible text content of an element by CSS selector.
+        // Use selector="" to read the full page body text.
+        if (platform() !== 'darwin') return header + `print("read_element requires macOS + Chrome")`;
+        const sel = String(input.selector ?? '').trim();
+        return this._chromeJs(JSON.stringify(sel || 'body'), `
+(function(sel) {
+  var el = sel ? document.querySelector(sel) : document.body;
+  if (!el) return 'NOT_FOUND: ' + sel;
+  return (el.textContent || el.innerText || el.value || '').trim().replace(/\\s+/g,' ').slice(0, 800);
+})(JSARG)
+`);
+      }
+
+      case 'get_elements': {
+        // List all interactive elements on the current page (buttons, links, inputs, headings, video).
+        // Use this to discover what's available before using click_text or type_in.
+        if (platform() !== 'darwin') return header + `print("get_elements requires macOS + Chrome")`;
+        return this._chromeJs(JSON.stringify(''), `
+(function() {
+  var seen = new Set(), els = [];
+  document.querySelectorAll('button,a,input,select,textarea,[role="button"],[role="link"],[role="tab"],[role="option"],h1,h2,h3,video,audio').forEach(function(el,i) {
+    if (i > 80 || !el.offsetParent) return;
+    var label = (el.textContent || el.getAttribute('aria-label') || el.placeholder || el.getAttribute('title') || el.value || '').trim().slice(0,80);
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    els.push(el.tagName.toLowerCase()+': '+label);
+  });
+  return els.length ? els.join('\\n') : 'No interactive elements found';
+})()
+`);
+      }
+
+      case 'get_media_state': {
+        // Get the current state of any video/audio element on the page.
+        // Returns: state (PLAYING/PAUSED), current time, duration, volume, source.
+        if (platform() !== 'darwin') return header + `print("get_media_state requires macOS + Chrome")`;
+        return this._chromeJs(JSON.stringify(''), `
+(function() {
+  var v = document.querySelector('video,audio');
+  if (!v) return 'No media on this page';
+  return JSON.stringify({
+    state: v.paused ? 'PAUSED' : 'PLAYING',
+    time: v.currentTime.toFixed(1)+'s',
+    duration: isFinite(v.duration) ? v.duration.toFixed(1)+'s' : 'live/unknown',
+    muted: v.muted,
+    volume: Math.round(v.volume*100)+'%',
+    title: document.title.slice(0,80)
+  });
+})()
+`);
+      }
+
+      case 'scroll_to': {
+        // Scroll the page to a specific element by CSS selector, or scroll by direction + amount.
+        if (platform() !== 'darwin') return header + `print("scroll_to requires macOS + Chrome")`;
+        const sel = String(input.selector ?? '').trim();
+        const scrollDir = String(input.direction ?? 'down').toLowerCase();
+        const scrollAmt = input.amount != null ? Number(input.amount) : 400;
+        if (sel) {
+          return this._chromeJs(JSON.stringify(sel), `
+(function(s){var el=document.querySelector(s);if(!el)return 'NOT_FOUND: '+s;el.scrollIntoView({behavior:'instant',block:'center'});return 'Scrolled to: '+s;})(JSARG)
+`);
+        }
+        const scrollY = scrollDir === 'up' ? -scrollAmt : scrollDir === 'down' ? scrollAmt : 0;
+        const scrollX = scrollDir === 'left' ? -scrollAmt : scrollDir === 'right' ? scrollAmt : 0;
+        return this._chromeJs(JSON.stringify([scrollX, scrollY]), `
+(function(xy){window.scrollBy(xy[0],xy[1]);return 'Scrolled';} )(JSARG)
+`);
+      }
+
+      case 'accessibility_click': {
+        // Click a button/element in a native macOS app (WhatsApp, Finder, etc.)
+        // using the Accessibility API — NO Screen Recording needed, just Accessibility permission.
+        const appName = String(input.app ?? '').trim();
+        const elemLabel = String(input.element ?? text ?? '').trim();
+        if (!appName || !elemLabel) return null;
+        const osName = platform();
+        if (osName !== 'darwin') return header + `print("accessibility_click is macOS only")`;
+        const safeApp = appName.replace(/'/g, "\\'");
+        const safeElem = elemLabel.replace(/'/g, "\\'");
+        return header + `
+import subprocess, time
+
+# Bring app to foreground
+subprocess.run(['osascript', '-e', 'tell application "${safeApp}" to activate'], capture_output=True)
+time.sleep(0.5)
+
+# Try clicking by name, then by description, then by value
+attempts = [
+    f'''tell application "System Events" to tell process "${safeApp}" to click (first UI element of front window whose name contains "${safeElem}")''',
+    f'''tell application "System Events" to tell process "${safeApp}" to click (first button whose description contains "${safeElem}")''',
+    f'''tell application "System Events" to tell process "${safeApp}" to click (first UI element whose value contains "${safeElem}")''',
+]
+
+success = False
+for script in attempts:
+    r = subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
+    if r.returncode == 0:
+        print(f"Clicked '{${JSON.stringify(elemLabel)}}' in ${safeApp}")
+        success = True
+        break
+
+if not success:
+    # Last resort: try clicking the front window element matching description
+    list_script = f"""tell application "System Events"
+  tell process "${safeApp}"
+    return name of every UI element of front window
+  end tell
+end tell"""
+    lr = subprocess.run(['osascript', '-e', list_script], capture_output=True, text=True)
+    print(f"Could not find element '${safeElem}' in ${safeApp}")
+    print(f"Available elements: {lr.stdout.strip()[:300] or 'could not list'}")
+`;
+      }
+
+      case 'cdp_screenshot': {
+        // Take a screenshot via Chrome DevTools Protocol — does NOT need Screen Recording.
+        // Requires Chrome to be running with --remote-debugging-port=9222.
+        // If CDP is unavailable, falls back to browser state (URL + title + media state).
+        if (platform() !== 'darwin') return header + `print("cdp_screenshot is macOS only for now")`;
+        return header + `
+import urllib.request, json, base64, os, tempfile, subprocess
+
+def get_browser_state():
+    simple_scr = """tell application "Google Chrome"
+  tell front window
+    tell active tab
+      return URL & "|||" & title
+    end tell
+  end tell
+end tell"""
+    r = subprocess.run(['osascript', '-e', simple_scr], capture_output=True, text=True)
+    parts = r.stdout.strip().split('|||')
+    if len(parts) >= 2:
+        print(f"[No CDP screenshot] Tab: {parts[1]}")
+        print(f"URL: {parts[0]}")
+    else:
+        print("[No CDP screenshot — Chrome not running or no active tab]")
+    print("To enable screenshots without Screen Recording, start Chrome with:")
+    print("  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222")
+
+try:
+    tabs_raw = urllib.request.urlopen('http://localhost:9222/json', timeout=2).read()
+    tabs = json.loads(tabs_raw)
+    if not tabs:
+        raise Exception("No tabs available")
+    ws_url = tabs[0].get('webSocketDebuggerUrl', '')
+    if not ws_url:
+        raise Exception("No WebSocket URL")
+
+    # Auto-install websockets if needed
+    try:
+        import websockets
+    except ImportError:
+        subprocess.run(['pip3', 'install', 'websockets', '-q'], capture_output=True, timeout=60)
+        import websockets
+
+    import asyncio
+
+    async def capture():
+        async with websockets.connect(ws_url) as ws:
+            await ws.send(json.dumps({'id':1,'method':'Page.captureScreenshot','params':{'format':'jpeg','quality':75}}))
+            resp = json.loads(await ws.recv())
+            return resp.get('result', {}).get('data')
+
+    img_b64 = asyncio.run(capture())
+    if not img_b64:
+        raise Exception("No screenshot data returned")
+
+    out_path = os.path.join(tempfile.gettempdir(), '0agent_cdp_shot.jpg')
+    with open(out_path, 'wb') as f:
+        f.write(base64.b64decode(img_b64))
+
+    print(f"Screenshot: {out_path}")
+    print(f"Tab: {tabs[0].get('title','?')} — {tabs[0].get('url','?')[:80]}")
+
+    try:
+        import pytesseract
+        from PIL import Image
+        img = Image.open(out_path)
+        text = pytesseract.image_to_string(img, config='--psm 11')
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if lines:
+            print("On-screen text (OCR):\\n" + "\\n".join(lines[:50]))
+    except Exception:
+        print("(OCR not available — install pytesseract for text extraction)")
+
+except Exception as e:
+    get_browser_state()
+`;
+      }
+
       case 'exec_js': {
         // Run arbitrary JavaScript in the current Chrome tab via AppleScript.
         // Does NOT require Screen Recording permission — works for any web page.
@@ -747,5 +1018,43 @@ else:
       default:
         return null;
     }
+  }
+
+  /**
+   * Generate a Python script that runs JS in the current Chrome tab via AppleScript.
+   * jsArgJson is passed as variable JSARG inside the JS template.
+   * No Screen Recording needed — uses Chrome's built-in execute javascript.
+   */
+  private _chromeJs(jsArgJson: string, jsTemplate: string): string {
+    const finalJs = `var JSARG = ${jsArgJson};\n${jsTemplate.trim()}`;
+    const jsJson = JSON.stringify(finalJs);
+    return `
+import subprocess, json, os, tempfile
+
+js = json.loads(${jsJson})
+tmpjs = os.path.join(tempfile.gettempdir(), f"0agent_cjs_{os.getpid()}.js")
+with open(tmpjs, 'w') as f:
+    f.write(js)
+as_script = f"""tell application "Google Chrome"
+  tell front window
+    tell active tab
+      set jsCode to do shell script "cat '{tmpjs}'"
+      return execute javascript jsCode
+    end tell
+  end tell
+end tell"""
+r = subprocess.run(['osascript', '-e', as_script], capture_output=True, text=True)
+try: os.remove(tmpjs)
+except: pass
+result = r.stdout.strip()
+if r.returncode != 0:
+    print(f"JS error: {r.stderr.strip()[:300]}")
+elif result.startswith('NOT_FOUND:'):
+    print(f"Not found: {result[10:]} — call get_elements to see available elements")
+elif result.startswith('CLICKED:') or result.startswith('TYPED'):
+    print(f"OK {result}")
+else:
+    print(result if result else "(no return value)")
+`;
   }
 }
