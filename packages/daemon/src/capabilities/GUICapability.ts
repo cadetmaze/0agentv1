@@ -408,13 +408,21 @@ except Exception:
 
       case 'open_url': {
         if (!url) return null;
-        const safeUrl = url.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        // For YouTube video pages, always add autoplay=1 so the video starts
+        let finalUrl = url;
+        if (/youtube\.com\/watch/i.test(url) && !url.includes('autoplay')) {
+          finalUrl = url + (url.includes('?') ? '&' : '?') + 'autoplay=1';
+        }
+        const safeUrl = finalUrl.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const isYouTubeVideo = /youtube\.com\/watch/i.test(finalUrl);
         const osName = platform();
         if (osName === 'darwin') {
           return header + `
 import subprocess
+import time
 
 url = '${safeUrl}'
+is_youtube_video = ${isYouTubeVideo ? 'True' : 'False'}
 
 # Check if Chrome is running
 chrome_running = subprocess.run(['pgrep', '-x', 'Google Chrome'], capture_output=True).returncode == 0
@@ -425,8 +433,46 @@ import urllib.parse
 domain = urllib.parse.urlparse(url).netloc
 
 if chrome_running:
-    # Check if URL domain is already open in an existing tab — switch to it instead of opening new tab
-    check_script = f"""
+    # For YouTube videos: always navigate to URL (reload restarts the video)
+    # For other pages: switch to existing tab if same domain
+    if is_youtube_video:
+        nav_script = f"""
+tell application "Google Chrome"
+  set foundTab to false
+  repeat with w in every window
+    set tabIdx to 1
+    repeat with t in every tab of w
+      if URL of t contains "youtube.com/watch" then
+        set active tab index of w to tabIdx
+        set index of w to 1
+        set URL of t to "{url}"
+        set foundTab to true
+        exit repeat
+      end if
+      set tabIdx to tabIdx + 1
+    end repeat
+    if foundTab then exit repeat
+  end repeat
+  if not foundTab then
+    tell front window to make new tab with properties {{URL:"{url}"}}
+  end if
+  activate
+end tell"""
+        subprocess.run(['osascript', '-e', nav_script], capture_output=True)
+        time.sleep(2)
+        # Trigger play via JavaScript in case autoplay was blocked
+        play_script = """
+tell application "Google Chrome"
+  tell front window
+    tell active tab
+      execute javascript "try { let v = document.querySelector('video'); if(v) { v.muted = false; v.play(); } } catch(e) {}"
+    end tell
+  end tell
+end tell"""
+        subprocess.run(['osascript', '-e', play_script], capture_output=True)
+        print(f"Playing YouTube video: {url}")
+    else:
+        check_script = f"""
 tell application "Google Chrome"
   set foundTab to false
   repeat with w in every window
@@ -451,11 +497,11 @@ tell application "Google Chrome"
     return "new-tab"
   end if
 end tell"""
-    r = subprocess.run(['osascript', '-e', check_script], capture_output=True, text=True)
-    if r.stdout.strip() == "switched":
-        print(f"Switched to existing Chrome tab: {url}")
-    else:
-        print(f"Opened new Chrome tab: {url}")
+        r = subprocess.run(['osascript', '-e', check_script], capture_output=True, text=True)
+        if r.stdout.strip() == "switched":
+            print(f"Switched to existing Chrome tab: {url}")
+        else:
+            print(f"Opened new Chrome tab: {url}")
 elif firefox_running:
     script = f'tell application "Firefox" to open location "{url}"'
     subprocess.run(['osascript', '-e', script])
