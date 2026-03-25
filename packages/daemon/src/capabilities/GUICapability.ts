@@ -324,6 +324,7 @@ print("Typed successfully")
 
       case 'hotkey': {
         if (!keys) return null;
+        const targetApp = input.app ? String(input.app) : '';
         // Parse "cmd+c" → ["command", "c"],  "ctrl+shift+t" → ["ctrl","shift","t"]
         const parts = keys.toLowerCase()
           .replace(/cmd|command|meta/g, 'command')
@@ -333,6 +334,36 @@ print("Typed successfully")
           .map(k => k.trim())
           .filter(Boolean);
         const pyKeys = JSON.stringify(parts);
+        // If target app specified, focus it via AppleScript first, then send key via AppleScript
+        // (not pyautogui — pyautogui sends to whatever OS window is currently focused, usually Terminal)
+        if (targetApp && platform() === 'darwin') {
+          const safeApp = targetApp.replace(/'/g, "\\'");
+          // Map key names to AppleScript keystroke syntax
+          const asKey = parts[parts.length - 1] ?? '';
+          const modifiers = parts.slice(0, -1).map(k => {
+            if (k === 'command') return 'command down';
+            if (k === 'ctrl') return 'control down';
+            if (k === 'shift') return 'shift down';
+            if (k === 'option') return 'option down';
+            return '';
+          }).filter(Boolean).join(', ');
+          const asModStr = modifiers ? ` using {${modifiers}}` : '';
+          return header + `
+import subprocess, time
+# Focus target app first
+subprocess.run(['osascript', '-e', 'tell application "${safeApp}" to activate'], capture_output=True)
+time.sleep(0.3)
+# Send keystroke via AppleScript (reliable — goes to the focused app, not Terminal)
+as_script = '''tell application "System Events"
+  keystroke "${asKey}"${asModStr}
+end tell'''
+r = subprocess.run(['osascript', '-e', as_script], capture_output=True, text=True)
+if r.returncode == 0:
+    print(f"Sent ${parts.join('+')} to ${safeApp}")
+else:
+    print(f"Keystroke error: {r.stderr.strip()[:200]}")
+`;
+        }
         return header + `
 keys = ${pyKeys}
 pyautogui.hotkey(*keys)
