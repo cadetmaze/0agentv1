@@ -466,7 +466,8 @@ export class AgentExecutor {
         `  "my birthday is X" → memory_write({label:"user_birthday", content:"X", type:"identity"})`,
         `  "we use React" → memory_write({label:"tech_stack", content:"React", type:"tech"})`,
         `Also write: URLs, ports, paths, project names, preferences, decisions, task outcomes.`,
-        `ALWAYS call memory_write before your text response. Never skip it for conversational messages.`,
+        `Only call memory_write when the user shares something worth remembering long-term.`,
+        `Do NOT call it for greetings, chitchat, or simple questions with no durable facts.`,
       );
     }
 

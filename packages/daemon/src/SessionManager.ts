@@ -471,9 +471,9 @@ export class SessionManager {
         this.addStep(sessionId, `Done (${agentResult.tokens_used} tokens, ${agentResult.iterations} LLM turns)`);
 
         // ── Guaranteed baseline write: session summary always hits the graph ──
-        // This fires even if the LLM extraction below fails, ensuring SOMETHING
-        // is always written so the graph updates are visible at localhost:4200.
-        if (this.graph) {
+        // Skip for trivial conversational messages — no useful facts to persist.
+        const isConversational = /^(hey|hi|hello|sup|yo|what'?s up|how are you|thanks|ok|cool|bye|good\s+(morning|evening|afternoon)|lol|nice)[!?.\s,]*$/i.test(enrichedReq.task.trim());
+        if (!isConversational && this.graph) {
           try {
             const nodeId = `memory:session_${sessionId.slice(0, 8)}`;
             const label  = enrichedReq.task.slice(0, 80);
@@ -503,10 +503,12 @@ export class SessionManager {
           }
         }
 
-        // Extract and persist factual entities from this conversation to long-term memory
-        this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM, userEntityId).catch((err) => {
-          console.warn('[0agent] Memory extraction outer error:', err instanceof Error ? err.message : err);
-        });
+        // Extract and persist factual entities — skip conversational messages
+        if (!isConversational) {
+          this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM, userEntityId).catch((err) => {
+            console.warn('[0agent] Memory extraction outer error:', err instanceof Error ? err.message : err);
+          });
+        }
 
         this.completeSession(sessionId, {
           output: agentResult.output,
