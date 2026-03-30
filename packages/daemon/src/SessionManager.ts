@@ -355,6 +355,27 @@ export class SessionManager {
       const activeLLM = this.getFreshLLM();  // always latest key from config
       if (activeLLM?.isConfigured) {
         const userEntityId = enrichedReq.entity_id ?? this.identity?.entity_node_id;
+
+        // ── Fast path: conversational messages skip tools, system prompt, and all graph writes ──
+        // Saves ~3000 tokens per greeting by bypassing AgentExecutor entirely.
+        const isConversational = /^(hey|hi|hello|sup|yo|what'?s up|how are you|thanks|ok|cool|bye|good\s+(morning|evening|afternoon)|lol|nice)[!?.\s,]*$/i.test(enrichedReq.task.trim());
+        if (isConversational) {
+          const resp = await activeLLM.complete(
+            [{ role: 'user', content: enrichedReq.task }],
+            'You are a helpful assistant.',
+          );
+          this.emit({ type: 'session.token', session_id: sessionId, token: resp.content });
+          this.addStep(sessionId, `Done (${resp.tokens_used} tokens, 1 LLM turns)`);
+          this.completeSession(sessionId, {
+            output: resp.content,
+            files_written: [],
+            commands_run: [],
+            tokens_used: resp.tokens_used,
+            model: resp.model,
+          });
+          return this.sessions.get(sessionId)!;
+        }
+
         const executor = new AgentExecutor(
           activeLLM,
           { cwd: this.cwd, agent_root: this.agentRoot, graph: this.graph, onMemoryWrite: this.onMemoryWritten, entityNodeId: userEntityId },
@@ -471,9 +492,7 @@ export class SessionManager {
         this.addStep(sessionId, `Done (${agentResult.tokens_used} tokens, ${agentResult.iterations} LLM turns)`);
 
         // ── Guaranteed baseline write: session summary always hits the graph ──
-        // Skip for trivial conversational messages — no useful facts to persist.
-        const isConversational = /^(hey|hi|hello|sup|yo|what'?s up|how are you|thanks|ok|cool|bye|good\s+(morning|evening|afternoon)|lol|nice)[!?.\s,]*$/i.test(enrichedReq.task.trim());
-        if (!isConversational && this.graph) {
+        if (this.graph) {
           try {
             const nodeId = `memory:session_${sessionId.slice(0, 8)}`;
             const label  = enrichedReq.task.slice(0, 80);
@@ -503,12 +522,10 @@ export class SessionManager {
           }
         }
 
-        // Extract and persist factual entities — skip conversational messages
-        if (!isConversational) {
-          this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM, userEntityId).catch((err) => {
-            console.warn('[0agent] Memory extraction outer error:', err instanceof Error ? err.message : err);
-          });
-        }
+        // Extract and persist factual entities from this conversation to long-term memory
+        this._extractAndPersistFacts(enrichedReq.task, agentResult.output, activeLLM, userEntityId).catch((err) => {
+          console.warn('[0agent] Memory extraction outer error:', err instanceof Error ? err.message : err);
+        });
 
         this.completeSession(sessionId, {
           output: agentResult.output,
